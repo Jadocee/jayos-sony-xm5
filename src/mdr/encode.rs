@@ -726,15 +726,13 @@ fn encode_eq_preset(facts: &Facts, name: &str) -> Result<Outgoing, Refusal> {
 /// RET-is-the-SET property the other five verbs stand on, and the reason the
 /// round-trip test can put this frame back through the real decoder.
 ///
-/// THE MIDDLE BYTE IS A LITERAL 0x00, AND THAT IS A WEAKER CLAIM THAN THIS
-/// MODULE USUALLY MAKES. Every other encoder here echoes the unexplained bytes
-/// from the reading it is answering; this one cannot, because `Facts` keeps
-/// only whether the setting is on and not the reply's body. Both captures
-/// carry 0x00 and the reference does not name the field, so the corpus cannot
-/// tell an echo from a constant -- a device that answered with something else
-/// would be written back as 0x00 rather than as what it said. If a capture
-/// ever shows a different byte here, this is the line to change, and `Facts`
-/// would have to carry it.
+/// THE THIRD BYTE IS `GsSettingType::BOOLEAN_TYPE`, NAMED, NOT A LITERAL
+/// NOBODY COULD EXPLAIN. `GsSetParamBoolean` (T1:4323) declares it, and the
+/// decoder refuses a setting of any other type, so a setting this encodes a
+/// write for is a boolean by construction. The fourth is a `GsSettingValue`,
+/// whose ON is 0x00 -- written the other way round until the decoder's
+/// evidence for that (`decode_general_setting_param`) was found, which is why
+/// `general multipoint on` used to send what the headset reads as OFF.
 ///
 /// READ EVIDENCE FOR THE WRITE ITSELF, and theirs, not ours:
 /// `delarosa1312/omarchy-sony-xm5` (MIT, Copyright (c) 2026 Delarosa1312),
@@ -773,7 +771,7 @@ fn encode_general_setting(facts: &Facts, key: &str, on: bool) -> Result<Outgoing
         },
         0xD8,
         slot,
-        &[0x00, u8::from(on)],
+        &[payload::GS_BOOLEAN_TYPE, if on { payload::GS_ON } else { payload::GS_OFF }],
     ))
 }
 
@@ -996,13 +994,13 @@ fn encode_playback(word: &str) -> Result<Outgoing, Refusal> {
 
 // ── asking ───────────────────────────────────────────────────────────────────
 
-/// Every GET is two bytes: the command, then the inquired type.
+/// A GET: the command, then the inquired type.
 ///
-/// Settled beyond doubt -- `ConnectGetProtocolInfo` (T1:3477),
-/// `ConnectGetCapabilityInfo` (T1:3455), `ConnectGetDeviceInfo` (T1:3466) and
-/// `ConnectGetSupportFunction` (T1:3488) are two fields each, and the
-/// per-feature GETs are the same shape. A GET carries no state, so none of the
-/// echo machinery above applies to it.
+/// Two bytes for every GET this sends but one -- `ConnectGetProtocolInfo`
+/// (T1:3477), `ConnectGetCapabilityInfo` (T1:3455), `ConnectGetDeviceInfo`
+/// (T1:3466) and `ConnectGetSupportFunction` (T1:3488) are two fields each, and
+/// so are the per-feature GETs. The exception is [`gs_get_capability`]. A GET
+/// carries no state, so none of the echo machinery above applies to it.
 fn get(data_type: DataType, command: u8, kind: u8, cite: &'static str) -> Outgoing {
     Outgoing::new(
         data_type,
@@ -1117,12 +1115,37 @@ pub fn feature_gets(facts: &Facts) -> Vec<Outgoing> {
     // shows GENERAL_SETTING_RET_CAPABILITY arriving at 0xD1 and 0xD2.
     for slot in [0xD1u8, 0xD2, 0xD3, 0xD4] {
         if facts.advertises_one(&[slot]) {
-            out.push(get(DataType::DataMdr, 0xD0, slot, "GsGetCapability"));
+            out.push(gs_get_capability(slot));
             out.push(get(DataType::DataMdr, 0xD6, slot, "GsGetParam"));
         }
     }
     out
 }
+
+/// `GsGetCapability` (T1:4129): THREE bytes, not two.
+///
+/// The struct is `command, GsInquiredType type, DisplayLanguage
+/// displayLanguage` -- the headset is asked what a setting is called AND in
+/// which language to say it. This sent two bytes for as long as it existed,
+/// the shape every other GET has, which is a short struct: what a headset
+/// makes of a GET missing its last field is not something any capture shows.
+/// The reference client sends `ENGLISH` (0x01, T1:636; libmdr
+/// `HeadphonesV2.cpp` `RequestInitV2`, every slot), so this does too. The names
+/// the corpus carries are `GsStringFormat::ENUM_NAME` identifiers
+/// (`MULTIPOINT_SETTING`), so the language changes nothing this port reads
+/// today; it is sent because the struct has the field.
+fn gs_get_capability(slot: u8) -> Outgoing {
+    Outgoing::new(
+        DataType::DataMdr,
+        Evidence::HeaderOnly { set: "GsGetCapability", unverified: "nothing -- a GET carries no value" },
+        0xD0,
+        slot,
+        &[DISPLAY_LANGUAGE_ENGLISH],
+    )
+}
+
+/// `DisplayLanguage::ENGLISH` (T1:636).
+const DISPLAY_LANGUAGE_ENGLISH: u8 = 0x01;
 
 /// The `EqPresetId` byte for the name at `index` in [`EQ_PRESETS`].
 ///

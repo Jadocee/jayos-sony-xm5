@@ -425,13 +425,18 @@ fn a_general_setting_value_that_is_neither_on_nor_off_is_refused() {
     //
     // - 000035 is `d7 d1 00 01`
     // - 000043 is `d7 d2 00 00`
+    //
+    // The last byte is a `GsSettingValue`, ON = 0x00 (T1:956): so 0x01 is OFF.
+    // These two assertions said the opposite until the reference was read,
+    // and `multipoint_is_on_where_two_hosts_are_connected_at_once` in
+    // sony_session.rs is the corpus's own evidence that this way is right.
     assert!(matches!(
         payload::decode(MDR, &[0xD7, 0xD1, 0x00, 0x01]),
-        Reading::GeneralSettingParam { slot: 0xD1, enabled: true }
+        Reading::GeneralSettingParam { slot: 0xD1, enabled: false }
     ));
     assert!(matches!(
         payload::decode(MDR, &[0xD7, 0xD2, 0x00, 0x00]),
-        Reading::GeneralSettingParam { slot: 0xD2, enabled: false }
+        Reading::GeneralSettingParam { slot: 0xD2, enabled: true }
     ));
     // AND NOTHING ELSE FOLDED INTO A BOOL. The reference's on/off enums are
     // not uniformly 0=off -- Speak-to-Chat's is inverted, which
@@ -449,6 +454,27 @@ fn a_general_setting_value_that_is_neither_on_nor_off_is_refused() {
         payload::decode(MDR, &[0xD7, 0xD1, 0x00, 0x01, 0x00]),
         Reading::Unhandled { .. }
     ));
+    // A LIST-TYPE setting is not a switch. Its setting-type byte is 0x01
+    // (T1:952) and its body is `GsRetParamList`, which nothing here decodes;
+    // read as a boolean, its first byte would be taken for on or off.
+    assert!(
+        matches!(payload::decode(MDR, &[0xD7, 0xD1, 0x01, 0x00]), Reading::Unhandled { .. }),
+        "a list-type setting was read as a switch"
+    );
+}
+
+#[test]
+fn a_list_type_setting_is_not_offered_as_a_switch() {
+    // The capability reply names the type before the strings. A LIST_TYPE
+    // (0x01, T1:952) capability decodes to nothing, so no switch is drawn for
+    // a setting whose param body this port cannot read or write.
+    let boolean = [0xD1, 0xD1, 0x00, 0x01, 0x01, b'X', 0x01, b'S'];
+    assert!(matches!(payload::decode(MDR, &boolean), Reading::GeneralSettingInfo(_)));
+    let list = [0xD1, 0xD1, 0x01, 0x01, 0x01, b'X', 0x01, b'S'];
+    assert!(matches!(payload::decode(MDR, &list), Reading::Unhandled { .. }));
+    // And a string format the reference does not declare (T1:963 has two).
+    let format = [0xD1, 0xD1, 0x00, 0x02, 0x01, b'X', 0x01, b'S'];
+    assert!(matches!(payload::decode(MDR, &format), Reading::Unhandled { .. }));
 }
 
 #[test]
@@ -464,7 +490,8 @@ fn a_volunteered_setting_change_reads_the_same_as_an_answered_one() {
     let ret = payload::decode(MDR, &[0xD7, 0xD2, 0x00, 0x01]);
     let ntfy = payload::decode(MDR, &[0xD9, 0xD2, 0x00, 0x01]);
     assert_eq!(ret, ntfy, "a volunteered change decoded differently from an answer");
-    assert!(matches!(ntfy, Reading::GeneralSettingParam { slot: 0xD2, enabled: true }));
+    // 0x01 is GsSettingValue::OFF.
+    assert!(matches!(ntfy, Reading::GeneralSettingParam { slot: 0xD2, enabled: false }));
 }
 
 #[test]

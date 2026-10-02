@@ -736,13 +736,21 @@ fn every_verb() -> Vec<Verb> {
 }
 
 #[test]
-fn every_get_is_two_bytes_and_asks_at_a_real_type() {
+fn every_get_has_the_shape_its_struct_declares_and_asks_at_a_real_type() {
     let facts = captured_facts();
     let mut all = encode::handshake();
     all.extend(encode::feature_gets(&facts));
     assert!(all.len() >= 20, "only {} queries", all.len());
     for query in &all {
-        assert_eq!(query.payload.len(), 2, "{query:?}");
+        // Two bytes, command and inquired type -- except GsGetCapability
+        // (T1:4129), which also says which language to name the setting in,
+        // and asks for ENGLISH (0x01) as the reference client does.
+        if query.command() == Some(0xD0) {
+            assert_eq!(query.payload.len(), 3, "{query:?}");
+            assert_eq!(query.payload[2], 0x01, "GsGetCapability asks in English: {query:?}");
+        } else {
+            assert_eq!(query.payload.len(), 2, "{query:?}");
+        }
         // Every GET command is even, and its reply is the odd byte above it:
         // GET = base, RET = base+1. So a GET whose command were odd would be
         // asking with a reply's byte.

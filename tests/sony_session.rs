@@ -1172,7 +1172,9 @@ fn the_headsets_own_named_settings_reach_the_document() {
     // the daemon published nothing about them.
     //
     // The values below are the captured device's, not a fixture of ours:
-    // 000031/000035 say sidetone is on, 000039/000043 say multipoint is off.
+    // 000031/000035 say sidetone is off, 000039/000043 say multipoint is on.
+    // (The other way round until the value byte was read as the reference
+    // declares it -- see `multipoint_is_on_where_two_hosts_are_connected_at_once`.)
     let mut session = fresh();
     let out = replay(&mut session, 4096);
 
@@ -1200,14 +1202,14 @@ fn the_headsets_own_named_settings_reach_the_document() {
     assert_eq!(rows[0]["key"], "sidetone");
     assert_eq!(rows[0]["name"], "SIDETONE_SETTING", "the wire's own word, untouched");
     assert_eq!(rows[0]["summary"], "SIDETONE_SETTING_SUMMARY");
-    assert_eq!(rows[0]["enabled"], true);
+    assert_eq!(rows[0]["enabled"], false);
 
     assert_eq!(rows[1]["key"], "multipoint");
     assert_eq!(rows[1]["name"], "MULTIPOINT_SETTING");
     // The device telling us WHICH multipoint it has: the suffix says the
     // switch trades against LDAC on this model.
     assert_eq!(rows[1]["summary"], "MULTIPOINT_SETTING_SUMMARY_LDAC_AVAILABLE");
-    assert_eq!(rows[1]["enabled"], false);
+    assert_eq!(rows[1]["enabled"], true);
 
     // AND NOT A TOUCH PANEL. Upstream's WH-1000XM5 answers TOUCH_PANEL_SETTING
     // in the slot this WF-1000XM5 puts sidetone in, which is the whole reason
@@ -1238,7 +1240,8 @@ fn a_later_slot_arriving_first_does_not_reorder_the_array() {
     };
     // 0xD4 first: capability, then its param.
     feed(&mut session, 7_000, &[0xD1, 0xD4, 0x00, 0x01, 0x02, b'z', b'z', 0x01, b'-']);
-    feed(&mut session, 7_010, &[0xD7, 0xD4, 0x00, 0x01]);
+    // 0x00 is GsSettingValue::ON (T1:956).
+    feed(&mut session, 7_010, &[0xD7, 0xD4, 0x00, 0x00]);
     // 0xD3 after it, and DELIBERATELY WITHOUT A PARAM REPLY.
     feed(&mut session, 7_020, &[0xD1, 0xD3, 0x00, 0x01, 0x02, b'a', b'a', 0x01, b'-']);
 
@@ -1301,9 +1304,44 @@ fn a_write_to_a_setting_this_headset_never_named_is_refused() {
     assert!(refusals.is_empty(), "`general multipoint on` was refused: {refusals:?}");
     let wire = sent(&out);
     let p = frame::unpack(wire.first().expect("a frame")).expect("a frame").payload;
-    // GENERAL_SETTING_SET_PARAM at the slot the device put multipoint in,
-    // and the 000043 body with its value flipped on.
-    assert_eq!(p, vec![0xD8, 0xD2, 0x00, 0x01], "{p:02x?}");
+    // GENERAL_SETTING_SET_PARAM at the slot the device put multipoint in:
+    // BOOLEAN_TYPE, then GsSettingValue::ON, which is 0x00 (T1:956). This
+    // asserted 0x01 -- OFF -- for as long as `general multipoint on` sent it.
+    assert_eq!(p, vec![0xD8, 0xD2, 0x00, 0x00], "{p:02x?}");
+}
+
+#[test]
+fn multipoint_is_on_where_two_hosts_are_connected_at_once() {
+    // THE CORPUS'S OWN EVIDENCE FOR THE POLARITY, independent of any decoder
+    // of the setting itself. The paired-device list in the same capture
+    // (fixture 000077) shows two peers connected at the same moment, and a
+    // headset with multipoint off holds one connection. So whatever the
+    // general-setting byte means, the multipoint reading of this capture must
+    // be ON -- and it read OFF while the value was taken as 0 = off.
+    let mut session = fresh();
+    replay(&mut session, 4096);
+    let v: serde_json::Value = serde_json::from_str(&session.document()).expect("json");
+
+    let connected = v["paired_devices"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        // Non-zero is connected: `state.rs`'s PairedDevice says 0x01 and 0x02
+        // were observed on live links and 0x00 on the rest.
+        .filter(|d| d["status"].as_u64().is_some_and(|s| s != 0))
+        .count();
+    assert!(connected >= 2, "the capture no longer shows two live connections: {}", v["paired_devices"]);
+
+    let multipoint = v["general_settings"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|g| g["key"] == "multipoint")
+        .expect("the capture names multipoint");
+    assert_eq!(
+        multipoint["enabled"], true,
+        "two hosts are connected and multipoint reads off: the value byte is read inverted"
+    );
 }
 
 #[test]

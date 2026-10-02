@@ -935,8 +935,10 @@ pub enum Reading {
     /// - 000035: `d7 d1 00 01`
     /// - 000043: `d7 d2 00 00`
     ///
-    /// So on the captured WF-1000XM5, sidetone (slot 0xD1) is on and
-    /// multipoint (slot 0xD2) is off.
+    /// So on the captured WF-1000XM5, sidetone (slot 0xD1) is OFF and
+    /// multipoint (slot 0xD2) is ON. The last byte is a `GsSettingValue`,
+    /// whose ON is 0x00 -- see [`decode_general_setting_param`] for the
+    /// evidence, and for the years this said the opposite.
     GeneralSettingParam {
         slot: u8,
         enabled: bool,
@@ -1489,26 +1491,29 @@ fn decode_equalizer(message: &Message) -> Option<Reading> {
 ///   d1 d1 00 01 10 "SIDETONE_SETTING"   18 "SIDETONE_SETTING_SUMMARY"
 ///   d1 d2 00 01 12 "MULTIPOINT_SETTING" 29 "MULTIPOINT_SETTING_SUMMARY_LDAC_AVAILABLE"
 ///    |  |  |  |  \_ a length-prefixed string, then another
-///    |  |  |  \_ 0x01 on both
-///    |  |  \_ 0x00 on both
+///    |  |  |  \_ GsStringFormat: ENUM_NAME (0x01) on both
+///    |  |  \_ GsSettingType: BOOLEAN_TYPE (0x00) on both
 ///    |  \_ the slot, which is also the inquired type
 ///    \_ the command
 ///
-/// THE TWO BYTES BEFORE THE STRINGS ARE NOT DECODED, and that is a decision.
-/// The reference declares a `GeneralSettingType` (BOOLEAN / LIST) and a
-/// sub-type beside it, and 0x00/0x01 is consistent with "boolean, one
-/// alternative pair" -- but both captures carry the same two bytes, so the
-/// corpus cannot tell a field apart from a constant. Guessing which is which
-/// would produce a plausible label from the wrong byte forever. What IS read
-/// is what the corpus varies: the slot and the two names.
+/// THE TWO BYTES ARE NAMED, AND ONE OF THEM DECIDES WHAT FOLLOWS. These were
+/// once left undecoded on the grounds that both captures carry the same two
+/// bytes, so the corpus cannot tell a field from a constant. The reference
+/// can: `GsRetCapability` (T1:4220) declares offset 2 a `GsSettingType`
+/// (T1:949: BOOLEAN_TYPE 0x00, LIST_TYPE 0x01) and offset 3 a
+/// `GsStringFormat` (T1:963: RAW_NAME 0x00, ENUM_NAME 0x01). The corpus fixed
+/// the VALUES and the header supplies the NAMES; the decode needs both.
 ///
-/// A LIST-TYPE SETTING WOULD DECODE WRONGLY HERE if one existed, and this is
-/// the honest limit: the body after the two names would differ, the length
-/// check below would reject it, and it would arrive as `Unhandled` with its
-/// key -- which is the right answer for a shape no capture contains.
+/// ONLY A BOOLEAN IS READ. A LIST-TYPE setting has a different param body
+/// (`GsRetParamList`) that nothing here decodes, and reading its capability
+/// as if it were a switch would put a switch on the page that writes the
+/// wrong frame. It arrives as `Unhandled` with its key instead. A string
+/// format other than the two declared is refused the same way.
 fn decode_general_setting_info(message: &Message) -> Option<Reading> {
     let slot = message.kind?;
-    // The two undecoded bytes, then the names.
+    if *message.body.first()? != GS_BOOLEAN_TYPE || *message.body.get(1)? > 0x01 {
+        return None;
+    }
     let name = prefixed_string(message.body, 2)?;
     let summary = prefixed_string(message.body, 2 + 1 + name.len())?;
     // Nothing may be left over: a trailing byte means this is a different
@@ -1522,25 +1527,48 @@ fn decode_general_setting_info(message: &Message) -> Option<Reading> {
 /// `GENERAL_SETTING_RET_PARAM`: whether the setting in this slot is on.
 ///
 /// CAPTURED: `d7 d1 00 01` and `d7 d2 00 00` -- so on the captured
-/// WF-1000XM5 sidetone is on and multipoint is off.
+/// WF-1000XM5 sidetone is OFF and multipoint is ON.
 ///
-/// ONE BYTE, TWO VALUES, AND ANYTHING ELSE IS REFUSED. The reference's
-/// on/off enums are not uniformly 0=off -- `speak-to-chat` is inverted, which
-/// `decode_speak_to_chat` has a paragraph about -- so a third value here is
-/// not something to fold into a bool. It arrives as `Unhandled` with its key
-/// instead, which is what somebody extending this needs.
+/// THE VALUE IS A `GsSettingValue`, AND ITS ON IS 0x00. `GsRetParamBoolean`
+/// (T1:4267) is `command, type, GsSettingType settingType, GsSettingValue
+/// value`, and `GsSettingValue` (T1:956) declares ON = 0x00, OFF = 0x01 --
+/// the inverted convention `OnOffSettingValue` uses, which `decode_speak_to_chat`
+/// already has a paragraph about. This read it the other way for as long as
+/// it existed, on the strength of "0 is off" and a byte the corpus showed in
+/// both positions, and the encoder made the same mistake in mirror, so every
+/// round-trip test passed over a write that did the opposite of what was
+/// asked. Three things say this way round is right, independently:
+///
+/// - the reference CLIENT reads `res.value == GsSettingValue::ON` and writes
+///   `submitted ? ON : OFF` (libmdr `HeadphonesV2T1.cpp:501`, V2:804-811);
+/// - Gadgetbridge's V2 touch-sensor write sends 0x00 for enabled
+///   (`SonyProtocolImplV2.setWideAreaTap`, "this is reversed on V2");
+/// - and the corpus itself: fixture 000077 is the paired-device list with
+///   TWO peers connected at once, which a headset with multipoint off cannot
+///   do. Read the old way, the same capture said multipoint was off.
+///
+/// THE SETTING TYPE MUST BE BOOLEAN, and the value one of the two declared.
+/// Anything else is `Unhandled` with its key, not rounded to the nearer of two
+/// answers.
 fn decode_general_setting_param(message: &Message) -> Option<Reading> {
     let slot = message.kind?;
-    if message.body.len() != 2 {
+    if message.body.len() != 2 || message.body[0] != GS_BOOLEAN_TYPE {
         return None;
     }
-    let enabled = match message.body.get(1)? {
-        0x00 => false,
-        0x01 => true,
+    let enabled = match message.body[1] {
+        GS_ON => true,
+        GS_OFF => false,
         _ => return None,
     };
     Some(Reading::GeneralSettingParam { slot, enabled })
 }
+
+/// `GsSettingType::BOOLEAN_TYPE` (T1:951).
+pub const GS_BOOLEAN_TYPE: u8 = 0x00;
+/// `GsSettingValue::ON` (T1:958). Yes, zero.
+pub const GS_ON: u8 = 0x00;
+/// `GsSettingValue::OFF` (T1:959).
+pub const GS_OFF: u8 = 0x01;
 
 /// `ConnectRetDeviceInfo*`: what the headset calls itself.
 ///
