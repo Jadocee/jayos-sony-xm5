@@ -115,14 +115,16 @@ by trimmed key or by full name, is refused with the slots listed.
 
 **13. The page.** jayos's Headphones page has never been drawn on a screen.
 `contract/state.example.json` is a real document to draw it against, and
-`contract/state.alert.example.json` one with a question pending; the
+`contract/state.alert.example.json` one with a question pending, and jayos's
+`tools/test-page-layout.sh` builds the page against both (jayos `927e3ef`) --
+run there under a `qmltestrunner` stand-in, which is not a screen. The
 screenshot itself needs a compositor.
 
 **14. Persistence.** That a general-setting write survives a reconnect is
 `delarosa1312/omarchy-sony-xm5`'s finding, not this package's. With
-`qs-sonyd --alerts` the headset asks before a multipoint change, and `qs-sony
-send alert yes|no` answers; jayos's page does not yet -- it reads no `alert`
-until the jayos commit that re-vendors this contract. A drop of this link
+`qs-sonyd --alerts` the headset asks before a multipoint change, and either
+`qs-sony send alert yes|no` or jayos's Headphones page, which draws the
+question with Yes and No since jayos `927e3ef`, answers it. A drop of this link
 while a yes to a disconnecting change is on the wire, or within five seconds
 of the headset acknowledging it, is a clean close rather than an error; the
 header does not say which link such a change drops, so a drop later than
