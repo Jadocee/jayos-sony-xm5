@@ -42,6 +42,9 @@ const PROSE: &[&str] = &[
     "src/mdr/encode.rs",
     "tests/sony_contract.rs",
     "tests/fixtures/mdr/PROVENANCE.md",
+    "docs/OUTSTANDING.md",
+    "docs/EVIDENCE.md",
+    "docs/CAPTURE.md",
 ];
 
 /// The payload of the fixture whose counter is `counter`, if there is one.
