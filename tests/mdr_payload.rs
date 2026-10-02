@@ -908,3 +908,48 @@ fn the_same_bytes_on_the_other_table_are_not_the_same_message() {
         }
     }
 }
+
+#[test]
+fn the_captured_keys_are_exactly_the_ones_the_corpus_decodes() {
+    // `payload::CAPTURED` is the read side's claim of capture, and a claim is
+    // only worth what holds it. Both directions: a key there that no fixture
+    // decodes is a capture nobody made, and a decoded fixture key missing
+    // there would be reported as header-only when a headset was seen sending
+    // it. Keys decoded on other grounds are listed in OTHER_GROUNDS instead,
+    // and may hold a fixture's bytes -- that is the point of the distinction.
+    use std::collections::BTreeSet;
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mdr");
+    let mut decoded = BTreeSet::new();
+    for entry in std::fs::read_dir(dir).expect("the corpus") {
+        let path = entry.expect("an entry").path();
+        if path.extension().is_none_or(|x| x != "bin") {
+            continue;
+        }
+        let f = frame::unpack(&std::fs::read(&path).expect("it reads")).expect("it unpacks");
+        if f.payload.len() < 2 || payload::grounds(f.data_type, &f.payload).is_none() {
+            continue;
+        }
+        let wire = f.data_type.to_wire();
+        let command = if wire == 0x0C {
+            payload::Command::from_byte(f.payload[0]).canonical().to_byte()
+        } else {
+            f.payload[0]
+        };
+        decoded.insert((wire, command, f.payload[1]));
+    }
+    let other: BTreeSet<payload::Key> = payload::OTHER_GROUNDS.iter().map(|(k, _, _)| *k).collect();
+    let captured: BTreeSet<payload::Key> = payload::CAPTURED.iter().copied().collect();
+    let want: BTreeSet<payload::Key> = decoded.difference(&other).copied().collect();
+    assert_eq!(captured, want, "CAPTURED and the corpus disagree");
+    assert!(captured.is_disjoint(&other), "a key is claimed both captured and otherwise grounded");
+}
+
+#[test]
+fn a_frame_nothing_decodes_has_no_grounds_and_a_header_only_decode_says_so() {
+    // The plain single-battery form: decoded, never captured.
+    assert_eq!(payload::grounds(MDR, &[0x23, 0x00, 0x49, 0x01]), Some(payload::Grounds::HeaderOnly));
+    // A captured key.
+    assert_eq!(payload::grounds(MDR, &[0x23, 0x09, 0x46, 0x00, 0x46, 0x00, 0x1e, 0x1e]).map(|g| g.as_str()), Some("captured"));
+    // Nothing decodes this.
+    assert_eq!(payload::grounds(MDR, &[0x01, 0x00]), None);
+}

@@ -98,6 +98,50 @@ pub struct Bound {
     /// kernel closes the descriptor either way.
     _lock: std::fs::File,
     stop: Arc<AtomicBool>,
+    /// The socket's directory, as the descriptor `ensure_private_dir`
+    /// verified, its name in it, and the inode the bind made.
+    ///
+    /// KEPT FOR THE DAEMON'S LIFE, and that is the whole of plan 23's item 8.
+    /// The bind went through this descriptor so a directory swapped after the
+    /// check could not redirect it -- and then the descriptor was dropped, and
+    /// the two operations that came later, the stopper's wake-up connection
+    /// and the shutdown unlink, went back to the PATH. Whatever stood at the
+    /// path by then is what they reached: the unlink could remove a socket
+    /// this process never made, and the wake-up could connect to something
+    /// else and leave `serve` blocked in `accept` for ever.
+    here: Arc<Here>,
+}
+
+/// The socket as this process made it: where, under what name, which inode.
+struct Here {
+    dir: std::fs::File,
+    name: String,
+    ino: libc::ino_t,
+}
+
+impl Here {
+    /// The socket by descriptor, for a connect: `/proc/self/fd/<N>/<name>`,
+    /// which the kernel resolves through the open directory, not the path.
+    fn by_descriptor(&self) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}/{}", self.dir.as_raw_fd(), self.name))
+    }
+
+    /// Unlink the socket if, and only if, it is still the one the bind made:
+    /// a socket, at that name, in that directory, with that inode. Anything
+    /// else at the name is somebody else's and is left alone.
+    fn remove_if_ours(&self) {
+        let Ok(c_name) = super::c_name(&self.name) else { return };
+        let dir_fd = self.dir.as_raw_fd();
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: dir_fd is a directory descriptor this struct owns; c_name
+        // outlives the call; stat is a live, writable struct.
+        let rc =
+            unsafe { libc::fstatat(dir_fd, c_name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) };
+        if rc == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFSOCK && stat.st_ino == self.ino {
+            // SAFETY: as above.
+            let _ = unsafe { libc::unlinkat(dir_fd, c_name.as_ptr(), 0) };
+        }
+    }
 }
 
 /// Why the socket could not be taken.
@@ -217,7 +261,21 @@ pub fn bind(socket: &Path) -> Result<Bound, BindError> {
         return Err(BindError::Io(std::io::Error::last_os_error()));
     }
 
-    Ok(Bound { listener, path: socket.to_path_buf(), _lock: lock, stop: Arc::new(AtomicBool::new(false)) })
+    // The inode the bind made, so shutdown can tell this socket from one
+    // somebody put at the same name since.
+    let mut made: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: dir_fd valid, c_socket outlives the call, made is live.
+    if unsafe { libc::fstatat(dir_fd, c_socket.as_ptr(), &mut made, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err(BindError::Io(std::io::Error::last_os_error()));
+    }
+
+    Ok(Bound {
+        listener,
+        path: socket.to_path_buf(),
+        _lock: lock,
+        stop: Arc::new(AtomicBool::new(false)),
+        here: Arc::new(Here { dir, name: socket_name.to_string(), ino: made.st_ino }),
+    })
 }
 
 impl Bound {
@@ -228,7 +286,7 @@ impl Bound {
     /// one and lets it close, which is also why `serve` re-checks the flag
     /// immediately after accepting rather than only at the top.
     pub fn stopper(&self) -> Stopper {
-        Stopper { stop: Arc::clone(&self.stop), path: self.path.clone() }
+        Stopper { stop: Arc::clone(&self.stop), here: Arc::clone(&self.here) }
     }
 
     pub fn path(&self) -> &Path {
@@ -294,20 +352,25 @@ impl Bound {
         }
         // The socket outlives the process only as debris, and the next daemon
         // to hold the lock removes it. Removing it here too means the common
-        // case leaves nothing behind.
-        let _ = std::fs::remove_file(&self.path);
+        // case leaves nothing behind -- through the directory descriptor and
+        // only if the inode is still ours. See `Bound::here`.
+        self.here.remove_if_ours();
     }
 }
 
 pub struct Stopper {
     stop: Arc<AtomicBool>,
-    path: PathBuf,
+    here: Arc<Here>,
 }
 
 impl Stopper {
+    /// Ask the server to return, and wake it.
+    ///
+    /// The wake-up connects through the directory descriptor, so it reaches
+    /// this server's socket even if the path now names something else.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
-        let _ = UnixStream::connect(&self.path);
+        let _ = UnixStream::connect(self.here.by_descriptor());
     }
 }
 

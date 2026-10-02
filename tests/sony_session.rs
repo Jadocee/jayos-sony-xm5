@@ -1433,3 +1433,26 @@ fn a_ten_band_or_odd_count_equaliser_is_not_split() {
     assert_eq!(eq["clear_bass"], 0);
     assert_eq!(eq["bands"], serde_json::json!([0, 2, -2]));
 }
+
+#[test]
+fn every_frame_a_command_becomes_is_logged_with_its_evidence() {
+    // The daemon's log is where somebody with a headset and a capture running
+    // reads which writes to compare first. A command that reaches the wire
+    // without saying how well-founded its frame is would leave them guessing.
+    let mut session = ready_session();
+    let out = session.step(Input::Command { now: 9_000, id: ClientId(4), line: "noise anc" });
+    let sent_notes: Vec<&Note> =
+        notes(&out).into_iter().filter(|n| matches!(n, Note::Sent { .. })).collect();
+    assert_eq!(sent_notes.len(), 1, "one frame, one note: {sent_notes:?}");
+    let Note::Sent { command, kind, tier, set } = sent_notes[0] else { unreachable!() };
+    assert_eq!((*command, *kind), (0x68, 0x17), "NCASM_SET_PARAM at the type the headset answered at");
+    assert_eq!(*tier, "mirrored-capture");
+    assert!(set.starts_with("NcAsmSetParam"), "{set}");
+
+    // And a refusal is not a send.
+    let out = session.step(Input::Command { now: 9_100, id: ClientId(4), line: "connection stable" });
+    assert!(
+        !notes(&out).iter().any(|n| matches!(n, Note::Sent { .. })),
+        "a refused command was logged as sent"
+    );
+}

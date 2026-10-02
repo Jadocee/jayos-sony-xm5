@@ -380,6 +380,9 @@ fn log(note: &Note) {
         }
         Note::Refused(refusal) => eprintln!("qs-sonyd: refused: {}", refusal.message()),
         Note::StrayAck { seq } => eprintln!("qs-sonyd: an acknowledgement for seq {seq}, unasked"),
+        Note::Sent { command, kind, tier, set } => {
+            eprintln!("qs-sonyd: sending {set} (command {command:#04x} kind {kind:#04x}), {tier}");
+        }
     }
 }
 

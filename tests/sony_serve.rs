@@ -391,3 +391,47 @@ fn a_command_with_no_newline_is_cut_off_rather_than_buffered() {
     );
     stop();
 }
+
+#[test]
+fn a_directory_swapped_after_the_bind_is_neither_unlinked_nor_woken_by_mistake() {
+    // PLAN 23, ITEM 8. The bind already went through the directory descriptor,
+    // so a swap BEFORE it could not redirect it. Then the descriptor was
+    // dropped, and shutdown went back to the path for two things: the
+    // stopper's wake-up connection and the final unlink. A directory swapped
+    // in between -- by anything running as this user -- got both. The unlink
+    // removed whatever socket now stood at the name, and the wake-up reached
+    // THAT socket instead of this server's, which then sat in `accept` until
+    // something else happened to connect.
+    let base = work("swap");
+    let run = base.join("run");
+    let socket = run.join("daemon.sock");
+    let bound = serve::bind(&socket).expect("it binds");
+    let stopper = bound.stopper();
+    let server = std::thread::spawn(move || bound.serve(Arc::new(|_: ClientId, _: &str| "ok".to_string()), quick()));
+
+    // The swap: the real directory moves away, and a decoy with a socket of
+    // its own takes the name.
+    let moved = base.join("moved");
+    std::fs::rename(&run, &moved).expect("the directory moves");
+    std::fs::create_dir(&run).expect("a decoy directory");
+    let decoy = std::os::unix::net::UnixListener::bind(&socket).expect("a decoy socket");
+    decoy.set_nonblocking(true).expect("non-blocking");
+
+    // Stopped from another thread and waited on with a deadline, so that the
+    // failure this test is about -- a wake-up that reaches the decoy -- fails
+    // the test instead of hanging it.
+    let (done, wait) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        stopper.stop();
+        let _ = server.join();
+        let _ = done.send(());
+    });
+    assert!(
+        wait.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "the server never returned: its wake-up connected to the path, which is the decoy now"
+    );
+
+    assert!(socket.exists(), "shutdown unlinked a socket it did not make");
+    assert!(decoy.accept().is_err(), "the decoy was connected to; the wake-up went by path");
+    assert!(!moved.join("daemon.sock").exists(), "and it left its own socket behind");
+}

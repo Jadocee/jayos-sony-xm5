@@ -980,13 +980,13 @@ fn replay(args: &Args) -> ExitCode {
     };
     let frames = match sony_xm5::sony::replay::received_frames(Path::new(dir)) {
         Ok(frames) => frames,
-        Err(e) => return emit::failure(&format!("cannot read {dir}: {e}")),
+        Err(e) => return emit::failure(format!("cannot read {dir}: {e}")),
     };
     // A directory with no received frame in it is a wrong path far more often
     // than a capture of nothing, and a document of defaults would look like an
     // answer.
     if frames.is_empty() {
-        return emit::failure(&format!("{dir} holds no received frame (*-rx.*.bin)"));
+        return emit::failure(format!("{dir} holds no received frame (*-rx.*.bin)"));
     }
     let peer = args.value("peer").unwrap_or("WF-1000XM5");
     print!("{}", sony_xm5::sony::replay::document(&frames, peer, sony_xm5::sony::DAEMON_VERSION));

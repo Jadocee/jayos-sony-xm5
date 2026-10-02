@@ -1768,3 +1768,97 @@ fn decode_noise(message: &Message) -> Option<Reading> {
         settled,
     }))
 }
+
+// ── how well-founded a reading is ────────────────────────────────────────────
+
+/// How well-founded a decoded reading is -- the read-side twin of
+/// [`super::encode::Evidence`].
+///
+/// The module docs draw CAPTURED against HEADER ONLY in prose. That was
+/// enough while every decoder was one or the other; it stopped being enough
+/// when the reference CLIENT turned out to settle frames the corpus holds but
+/// cannot explain on its own, and when other projects' observations of a
+/// WH-1000XM5 turned out to settle frames the corpus does not hold at all. So
+/// it is a value, and `qs-sony decode` prints it beside every frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grounds {
+    /// A real headset sent this exact key, and it decoded to values that
+    /// came out sensible. The corpus in `tests/fixtures/mdr/` holds it.
+    Captured,
+    /// The meaning is the reference client's: libmdr decodes this key the
+    /// same way, and people run libmdr against real headsets. The bytes may
+    /// be captured; the meaning was not settled by them alone.
+    ReferenceClient,
+    /// Another project reports a real headset sending this, laid out this
+    /// way. Theirs, cited where it is used.
+    ThirdParty,
+    /// Transcribed from the reference header. Nothing has been seen sending
+    /// it, and nothing but the header says what it means.
+    HeaderOnly,
+}
+
+impl Grounds {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Grounds::Captured => "captured",
+            Grounds::ReferenceClient => "reference-client",
+            Grounds::ThirdParty => "third-party",
+            Grounds::HeaderOnly => "header-only",
+        }
+    }
+}
+
+/// `(data type, canonical command, inquired type)`.
+pub type Key = (u8, u8, u8);
+
+const T1: u8 = 0x0C;
+const T2: u8 = 0x0E;
+
+/// Every key the corpus holds that a decoder here reads, and nothing else.
+///
+/// HELD TO THE CORPUS BY A TEST, in both directions
+/// (`the_captured_keys_are_exactly_the_ones_the_corpus_decodes`): a key here
+/// that no fixture decodes would be a claim of capture with nothing behind
+/// it, and a corpus key that decodes and is missing here would be reported
+/// as header-only when a headset was seen sending it.
+pub const CAPTURED: &[Key] = &[
+    (T1, 0x05, 0x01),
+    (T1, 0x05, 0x02),
+    (T1, 0x07, 0x00),
+    (T1, 0x13, 0x02),
+    (T1, 0x23, 0x09),
+    (T1, 0x23, 0x0A),
+    (T1, 0x57, 0x00),
+    (T1, 0x67, 0x17),
+    (T1, 0xA7, 0x20),
+    (T1, 0xD1, 0xD1),
+    (T1, 0xD1, 0xD2),
+    (T1, 0xD7, 0xD1),
+    (T1, 0xD7, 0xD2),
+    (T1, 0xE1, 0x01),
+    (T1, 0xE7, 0x01),
+    (T1, 0xF7, 0x0C),
+    (T1, 0xFB, 0x0C),
+    (T2, 0x07, 0x00),
+    (T2, 0x37, 0x02),
+];
+
+/// Keys decoded on grounds other than a capture of their own, with the
+/// citation. Everything decodable and in neither list is
+/// [`Grounds::HeaderOnly`].
+pub const OTHER_GROUNDS: &[(Key, Grounds, &str)] = &[];
+
+/// The grounds a decoded frame stands on, or `None` when nothing decodes it.
+pub fn grounds(data_type: super::DataType, payload: &[u8]) -> Option<Grounds> {
+    if matches!(decode(data_type, payload), Reading::Unhandled { .. } | Reading::Ambiguous { .. }) {
+        return None;
+    }
+    let (&command, &kind) = (payload.first()?, payload.get(1)?);
+    let wire = data_type.to_wire();
+    let command = if wire == T1 { Command::from_byte(command).canonical().to_byte() } else { command };
+    let key = (wire, command, kind);
+    if CAPTURED.contains(&key) {
+        return Some(Grounds::Captured);
+    }
+    Some(OTHER_GROUNDS.iter().find(|(k, _, _)| *k == key).map_or(Grounds::HeaderOnly, |(_, g, _)| *g))
+}

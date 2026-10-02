@@ -140,6 +140,19 @@ pub enum Evidence {
         set: &'static str,
         ret: &'static str,
     },
+    /// The bytes the reference CLIENT sends -- libmdr, which people run
+    /// against real headsets -- for the same request, cited by file and line.
+    ///
+    /// Stronger than [`Evidence::HeaderOnly`], which is the header's word for
+    /// a struct's layout: this is a program that has been run against
+    /// hardware choosing those bytes. Weaker than a capture, because it is
+    /// still read, not observed here, and libmdr's own test corpus is the same
+    /// WF-1000XM5 this port's is.
+    ReferenceClient { set: &'static str, cite: &'static str },
+    /// The bytes another project sends to a real headset, and reports
+    /// working, for a request the reference does not settle. Named so a
+    /// reader knows the claim is theirs.
+    ThirdParty { set: &'static str, source: &'static str },
     /// Transcribed from the header, with no frame in either direction and no
     /// twin to mirror it against.
     HeaderOnly { set: &'static str, unverified: &'static str },
@@ -149,7 +162,19 @@ impl Evidence {
     pub fn tier(self) -> &'static str {
         match self {
             Evidence::MirroredCapture { .. } => "mirrored-capture",
+            Evidence::ReferenceClient { .. } => "reference-client",
+            Evidence::ThirdParty { .. } => "third-party",
             Evidence::HeaderOnly { .. } => "header-only",
+        }
+    }
+
+    /// The struct the frame was built as, whatever the tier.
+    pub fn set(self) -> &'static str {
+        match self {
+            Evidence::MirroredCapture { set, .. }
+            | Evidence::ReferenceClient { set, .. }
+            | Evidence::ThirdParty { set, .. }
+            | Evidence::HeaderOnly { set, .. } => set,
         }
     }
 }

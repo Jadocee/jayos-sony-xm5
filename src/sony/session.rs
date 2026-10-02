@@ -132,6 +132,16 @@ pub enum Note {
     /// An ACK arrived with nothing outstanding, or for a sequence we are not
     /// waiting on. Not fatal, and not silent either.
     StrayAck { seq: u8 },
+    /// A client's command became a frame, and this is how well-founded that
+    /// frame is.
+    ///
+    /// For the log, where somebody with a headset and a capture running reads
+    /// which of this port's writes stand on a capture and which on a header
+    /// or on another project's word -- the frames worth comparing first. Not
+    /// in the reply, which stays the bare `ok` the C++ daemon sends: a client
+    /// written against either reads `ok` and nothing else, and no reader of
+    /// ours would do anything with the tier but print it.
+    Sent { command: u8, kind: u8, tier: &'static str, set: &'static str },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -606,6 +616,14 @@ impl Session {
                         line: "error this daemon has too many commands outstanding".to_string(),
                     });
                     return;
+                }
+                if let Some((command, kind, _)) = outgoing.key() {
+                    out.push(Effect::Note(Note::Sent {
+                        command,
+                        kind,
+                        tier: outgoing.evidence.tier(),
+                        set: outgoing.evidence.set(),
+                    }));
                 }
                 self.queue(outgoing, Some(id));
             }
