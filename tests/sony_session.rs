@@ -1527,3 +1527,59 @@ fn the_document_publishes_the_ambient_range_the_headset_stated() {
     feed(&mut session, 8_010, &[0x69, 0x17, 0x01, 0x01, 0x01, 0x01, 0x04]);
     assert_eq!(range(&session), serde_json::json!({"min":2,"max":10,"step":2,"source":"device"}));
 }
+
+#[test]
+fn connection_playback_and_dsee_availability_reach_the_document() {
+    // PLAN 23, ITEMS 4, 5 AND 10, end to end through the session.
+    //
+    // The corpus first: its play status (000065) is PAUSE and its upscaling
+    // status (000097) is ENABLE, so the replayed document says `paused` and
+    // `dsee_available: true`. The WF-1000XM5 advertises no connection mode
+    // this port reads, so `connection.priority` stays `unknown`.
+    let mut session = fresh();
+    replay(&mut session, usize::MAX);
+    let v: serde_json::Value = serde_json::from_str(&session.document()).expect("json");
+    assert_eq!(v["playback"]["status"], "paused");
+    assert_eq!(v["dsee_available"], true);
+    assert_eq!(v["connection"]["priority"], "unknown");
+
+    // An over-ear headset advertising the LDAC connection form (0xE3), a
+    // playback controller (0xA1) and DSEE (0xE2). Synthetic: no WH capture.
+    let mut session = fresh();
+    session.step(Input::LinkUp { now: 0, peer: Peer { name: "WH-1000XM5".to_string(), protocol: 2 } });
+    let mut seq = 0u8;
+    let mut feed = |session: &mut Session, now: u64, payload: &[u8]| -> Vec<Effect> {
+        let out = session.step(Input::Bytes { now, bytes: &frame::pack(DataType::DataMdr, seq, payload) });
+        seq = 1 - seq;
+        out
+    };
+    feed(&mut session, 10, &[0x07, 0x00, 0x03, 0xE3, 0xFF, 0xA1, 0xFF, 0xE2, 0xFF]);
+    let doc = |session: &Session| -> serde_json::Value {
+        serde_json::from_str(&session.document()).expect("json")
+    };
+    assert_eq!(doc(&session)["capabilities"]["connection_mode"], true);
+    assert_eq!(doc(&session)["dsee_available"], serde_json::Value::Null, "not told yet is null");
+
+    feed(&mut session, 20, &[0xE7, 0x02, 0x01]);
+    assert_eq!(doc(&session)["connection"]["priority"], "stable");
+    // Volunteered (AUDIO_NTFY_PARAM), and it moves.
+    feed(&mut session, 30, &[0xE9, 0x02, 0x00]);
+    assert_eq!(doc(&session)["connection"]["priority"], "quality");
+
+    feed(&mut session, 40, &[0xA3, 0x01, 0x00, 0x01, 0x00]);
+    assert_eq!(doc(&session)["playback"]["status"], "playing");
+    feed(&mut session, 50, &[0xA5, 0x01, 0x00, 0x03, 0x01]);
+    assert_eq!(doc(&session)["playback"]["status"], "stopped");
+
+    feed(&mut session, 60, &[0xE5, 0x01, 0x01]);
+    assert_eq!(doc(&session)["dsee_available"], false);
+
+    // And the write goes out at the type the headset answered at, logged with
+    // what it stands on.
+    let out = session.step(Input::Command { now: 70, id: ClientId(9), line: "connection stable" });
+    let sent: Vec<&Note> = notes(&out).into_iter().filter(|n| matches!(n, Note::Sent { .. })).collect();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let Note::Sent { command, kind, tier, set } = sent[0] else { unreachable!() };
+    assert_eq!((*command, *kind, *tier), (0xE8, 0x02, "header-only"));
+    assert_eq!(*set, "AudioSetParamConnectionWithLdacStatus");
+}

@@ -125,6 +125,9 @@ const OUR_ADDITIONS: &str = concat!(
     // or the C++ daemon's 1..=20 -- which is what a document with no
     // NCASM_RET_CAPABILITY behind it says, as this one has none.
     r#","ambient_range":{"min":1,"max":20,"step":1,"source":"compat"}"#,
+    // Plan 23, item 10: whether DSEE can run now. `null` until the headset's
+    // AUDIO_RET_STATUS at UPSCALING says; the mock state has not been told.
+    r#","dsee_available":null"#,
 );
 
 #[test]

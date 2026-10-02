@@ -62,6 +62,7 @@ device.firmware
 device.model
 device.name
 device.protocol
+dsee_available
 equalizer
 equalizer.available_presets
 equalizer.bands

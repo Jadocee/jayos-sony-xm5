@@ -99,6 +99,8 @@ pub enum Command {
     PlayNtfyParam,
     AudioRetCapability,
     AudioRetStatus,
+    /// `AUDIO_NTFY_STATUS` (0xE5), the status reply volunteered.
+    AudioNtfyStatus,
     AudioRetParam,
     AudioNtfyParam,
     SystemRetParam,
@@ -141,6 +143,7 @@ impl Command {
             0xA9 => Command::PlayNtfyParam,
             0xE1 => Command::AudioRetCapability,
             0xE3 => Command::AudioRetStatus,
+            0xE5 => Command::AudioNtfyStatus,
             0xE7 => Command::AudioRetParam,
             0xE9 => Command::AudioNtfyParam,
             0xF7 => Command::SystemRetParam,
@@ -178,6 +181,7 @@ impl Command {
             Command::PlayNtfyParam => 0xA9,
             Command::AudioRetCapability => 0xE1,
             Command::AudioRetStatus => 0xE3,
+            Command::AudioNtfyStatus => 0xE5,
             Command::AudioRetParam => 0xE7,
             Command::AudioNtfyParam => 0xE9,
             Command::SystemRetParam => 0xF7,
@@ -215,6 +219,8 @@ impl Command {
     /// agree field for field, which is what lets 0xF9 and 0xFD carry
     /// Speak-to-Chat. So were `CommonNotifyStatusAudioCodec` (T1:3229) and
     /// `CommonRetStatusAudioCodec` (T1:3355): command, inquired type, codec.
+    /// And `AudioNotifyStatusCommon` (T1:2498) against `AudioRetStatusCommon`
+    /// (T1:2930): command, inquired type, one `EnableDisable`.
     pub fn canonical(self) -> Command {
         match self {
             Command::CommonNtfyStatus => Command::CommonRetStatus,
@@ -224,6 +230,7 @@ impl Command {
             Command::NcAsmNtfyParam => Command::NcAsmRetParam,
             Command::PlayNtfyStatus => Command::PlayRetStatus,
             Command::PlayNtfyParam => Command::PlayRetParam,
+            Command::AudioNtfyStatus => Command::AudioRetStatus,
             Command::AudioNtfyParam => Command::AudioRetParam,
             Command::SystemNtfyParam => Command::SystemRetParam,
             Command::SystemNtfyExtParam => Command::SystemRetExtParam,
@@ -637,6 +644,18 @@ impl Switch {
         }
     }
 
+    /// `EnableDisable` (`ProtocolV2.hpp:14`): `ENABLE = 0x00`, `DISABLE =
+    /// 0x01` -- inverted like [`Switch::from_on_off_setting`], and a separate
+    /// constructor so each call site names the enum it is reading rather than
+    /// borrowing another's polarity because the bytes happen to agree.
+    pub fn from_enable_disable(byte: u8) -> Switch {
+        match byte {
+            0x00 => Switch::On,
+            0x01 => Switch::Off,
+            other => Switch::Unknown(other),
+        }
+    }
+
     /// `UpscalingTypeAutoOff`: `OFF = 0x00`, `AUTO = 0x01`. The ordinary way
     /// round, and adjacent in the same header to one that is not.
     pub fn from_auto_off(byte: u8) -> Switch {
@@ -679,6 +698,102 @@ impl Switch {
             Switch::Unknown(_) => None,
         }
     }
+}
+
+/// `PriorMode` (T1:1399): what the headset favours on the radio link.
+///
+/// The document's words are the C++ daemon's `connection.priority`: `quality`
+/// for SOUND_QUALITY_PRIOR and `stable` for CONNECTION_QUALITY_PRIOR. The third
+/// value, LOW_LATENCY_PRIOR_BETA, has no word there and no verb here, so it is
+/// published as `unknown` rather than given a name the page would not draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriorMode {
+    SoundQuality,
+    ConnectionQuality,
+    LowLatencyBeta,
+    Other(u8),
+}
+
+impl PriorMode {
+    pub fn from_byte(byte: u8) -> PriorMode {
+        match byte {
+            0x00 => PriorMode::SoundQuality,
+            0x01 => PriorMode::ConnectionQuality,
+            0x02 => PriorMode::LowLatencyBeta,
+            other => PriorMode::Other(other),
+        }
+    }
+
+    pub fn to_byte(self) -> u8 {
+        match self {
+            PriorMode::SoundQuality => 0x00,
+            PriorMode::ConnectionQuality => 0x01,
+            PriorMode::LowLatencyBeta => 0x02,
+            PriorMode::Other(byte) => byte,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PriorMode::SoundQuality => "quality",
+            PriorMode::ConnectionQuality => "stable",
+            PriorMode::LowLatencyBeta | PriorMode::Other(_) => "unknown",
+        }
+    }
+}
+
+/// `PlaybackStatus` (T1:1307): what the source is doing.
+///
+/// NOT `PlaybackControl` (T1:1284), which is what a SET sends and shares value
+/// NAMES with this enum at different bytes -- PAUSE is 0x02 here and 0x01
+/// there. The two are separate types so no byte can cross between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackStatus {
+    Unsettled,
+    Play,
+    Pause,
+    Stop,
+    Other(u8),
+}
+
+impl PlaybackStatus {
+    pub fn from_byte(byte: u8) -> PlaybackStatus {
+        match byte {
+            0x00 => PlaybackStatus::Unsettled,
+            0x01 => PlaybackStatus::Play,
+            0x02 => PlaybackStatus::Pause,
+            0x03 => PlaybackStatus::Stop,
+            other => PlaybackStatus::Other(other),
+        }
+    }
+
+    /// The C++ daemon's `playback.status` words. Its `fast_forward` and
+    /// `rewind` have no value in this enum, so they are never produced here.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PlaybackStatus::Play => "playing",
+            PlaybackStatus::Pause => "paused",
+            PlaybackStatus::Stop => "stopped",
+            PlaybackStatus::Unsettled | PlaybackStatus::Other(_) => "unknown",
+        }
+    }
+}
+
+/// The half of a play-status reply both colliding structs agree on.
+///
+/// `RetPlayStatusPlaybackController` (T1:7451) and
+/// `RetPlayStatusPlaybackControlWithFunctionChange` (T1:7434) are both five
+/// bytes at PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT and differ at offset
+/// 4 alone -- a `MusicCallStatus` in one and an `EnableDisable` in the other.
+/// Offsets 2 and 3 are the same field of the same type in both, so those two
+/// are read and offset 4 is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayStatusReport {
+    /// Offset 2, `EnableDisable status`: whether the headset will take a
+    /// transport command now. ENABLE is 0x00.
+    pub control: Switch,
+    /// Offset 3.
+    pub status: PlaybackStatus,
 }
 
 /// `UpscalingType`: which DSEE this headset has.
@@ -954,6 +1069,19 @@ pub enum Reading {
     Codec(Codec),
     /// DSEE: which upscaler the headset has, or whether it is switched on.
     Dsee(DseeReport),
+    /// Whether DSEE can run now: `AUDIO_RET_STATUS` at UPSCALING, read as
+    /// `AudioRetStatusCommon`'s `EnableDisable` the way libmdr reads it.
+    /// CAPTURED: fixture 000097 is `e3 01 00`, ENABLE. See
+    /// [`decode_upscaling_status`].
+    UpscalingStatus { available: Switch },
+    /// The radio-link priority, at the inquired type the headset answered at:
+    /// CONNECTION_MODE (0x00) or CONNECTION_MODE_WITH_LDAC_STATUS (0x02). The
+    /// type is carried because it chooses the SET. See [`decode_connection`].
+    Connection { kind: u8, prior: PriorMode },
+    /// Whether the source is playing, and whether the headset will take a
+    /// transport command. CAPTURED: fixture 000065 is `a3 01 00 02 00`. See
+    /// [`decode_play_status`].
+    PlayStatus(PlayStatusReport),
     /// Speak-to-Chat: the switches, or the sensitivity and timeout.
     SpeakToChat(SpeakToChatReport),
     /// What one of the headset's named on/off settings IS.
@@ -1017,9 +1145,17 @@ pub enum Reading {
 /// The `(command, kind, len)` keys where the reference is genuinely ambiguous
 /// AND this daemon might see the message.
 ///
-/// The full list of 21 is in PROVENANCE.md; these are the two on commands this
-/// port speaks. The rest are firmware update, TWS topology, SAR and general
-/// settings, none of which this daemon touches.
+/// The full list of 21 is in PROVENANCE.md; this is the one on a command this
+/// port speaks that it still refuses. The rest are firmware update, TWS
+/// topology, SAR and general settings, none of which this daemon touches.
+///
+/// THE PLAY-STATUS PAIR USED TO BE HERE AND IS NOT ANY MORE, and not because
+/// the collision went away. `(0xA3|0xA5, 0x01, 5)` is still two structs that
+/// read offset 4 differently -- but they agree, field for field, on offsets 2
+/// and 3, and those two are all the document has a place for. So
+/// [`decode_play_status`] reads exactly the agreed half and never the byte in
+/// dispute: a partial decode is not a guess when the part it declines is the
+/// only part the two candidates disagree on.
 /// Matched against the RAW command byte, before any RET/NTFY canonicalising:
 /// the NcAsm collision below exists in the NTFY family and NOT in the RET one,
 /// because the two RET structs are six and seven bytes while both NTFY structs
@@ -1029,11 +1165,6 @@ const AMBIGUOUS: &[(u8, u8, usize, [&str; 2])] = &[
     // NCASM_NTFY_PARAM, NC_ON_OFF_AND_ASM_SEAMLESS (0x13). Offset 6 is
     // NcAsmOnOffValue in one and the ambient sound level in the other.
     (0x69, 0x13, 7, ["NcAsmNtfyParamNcOnOffAsmOnOff", "NcAsmNtfyParamNcOnOffAsmSeamless"]),
-    // PLAY_RET_STATUS and PLAY_NTFY_STATUS,
-    // PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT (0x01). Offset 4 is
-    // MusicCallStatus in one and EnableDisable in the other.
-    (0xA3, 0x01, 5, ["RetPlayStatusPlaybackControlWithFunctionChange", "RetPlayStatusPlaybackController"]),
-    (0xA5, 0x01, 5, ["NtfyPlayStatusPlaybackControlWithFunctionChange", "NtfyPlayStatusPlaybackController"]),
 ];
 
 /// Decode one payload, in the context of the frame that carried it.
@@ -1146,12 +1277,19 @@ pub fn decode(data_type: super::DataType, payload: &[u8]) -> Reading {
         Command::GsRetCapability => decode_general_setting_info(&message).unwrap_or(unhandled),
         Command::GsRetParam => decode_general_setting_param(&message).unwrap_or(unhandled),
         Command::PlayRetParam => decode_volume(&message).unwrap_or(unhandled),
+        Command::PlayRetStatus => decode_play_status(&message).unwrap_or(unhandled),
         Command::CommonRetStatus => decode_codec(&message).unwrap_or(unhandled),
         // Two commands, one feature: the capability reply carries which DSEE
-        // and the param reply carries whether it is on.
-        Command::AudioRetCapability | Command::AudioRetParam => {
-            decode_dsee(&message).unwrap_or(unhandled)
+        // and the param reply carries whether it is on. The param reply at
+        // the two connection types is the link priority instead -- the
+        // inquired type, not the command, separates them.
+        Command::AudioRetCapability => decode_dsee(&message).unwrap_or(unhandled),
+        Command::AudioRetParam => match message.kind {
+            Some(0x00 | 0x02) => decode_connection(&message),
+            _ => decode_dsee(&message),
         }
+        .unwrap_or(unhandled),
+        Command::AudioRetStatus => decode_upscaling_status(&message).unwrap_or(unhandled),
         // Same shape again: the param reply carries the switches and the
         // extended param reply carries the sensitivity and the timeout.
         Command::SystemRetParam | Command::SystemRetExtParam => {
@@ -1355,13 +1493,8 @@ fn decode_codec(message: &Message) -> Option<Reading> {
 /// the capability byte as an `UpscalingTypeAutoOff` turns 0x02 into
 /// out-of-range and loses the type altogether.
 ///
-/// Only these two are decoded. `AUDIO_RET_STATUS` also arrives at UPSCALING in
-/// this corpus (`e3 01 00`) and is deliberately left alone: NO struct in the
-/// reference declares that key -- `AudioRetStatusCommon` declares
-/// CONNECTION_MODE and the only upscaling status struct is the
-/// `*_WITH_STATUS_DISABLE_REASON` variant at a different inquired type -- so
-/// its third byte is an `EnableDisable` by shape and by nothing else. The
-/// state document has no field for it either way.
+/// `AUDIO_RET_STATUS` at UPSCALING (`e3 01 00`, fixture 000097) is the third
+/// DSEE message, and [`decode_upscaling_status`] reads it.
 fn decode_dsee(message: &Message) -> Option<Reading> {
     // AudioInquiredType::UPSCALING. The other upscaling type, 0x0B, carries a
     // status and a reason list and has no capture.
@@ -1376,6 +1509,77 @@ fn decode_dsee(message: &Message) -> Option<Reading> {
         _ => return None,
     }
     Some(Reading::Dsee(out))
+}
+
+/// `AudioRetStatusCommon` (T1:2930) at UPSCALING: whether DSEE can run now.
+///
+/// CAPTURED: fixture 000097, `e3 01 00` -- ENABLE, so available.
+///
+/// THIS WAS LEFT UNREAD FOR A WHILE, ON AN ARGUMENT THAT DID NOT HOLD. The note
+/// on [`decode_dsee`] used to say no struct declares this key, because
+/// `AudioRetStatusCommon`'s type defaults to CONNECTION_MODE. But that field
+/// is annotated `CODEGEN Ignore OUT_OF_RANGE is expected` and not `EnumRange`,
+/// which in this header means the default is not a pin -- the same reading
+/// that lets [`decode_volume`] answer at MUSIC_VOLUME. And the reference client
+/// settles it: libmdr deserializes exactly `AudioRetStatusCommon` (and
+/// `AudioNotifyStatusCommon` for 0xE5) at UPSCALING and stores
+/// `status == ENABLE` as `mUpscalingAvailable` (`HeadphonesV2T1.cpp:564-579`).
+/// So the grounds are the captured byte and a reference client that reads it
+/// the same way, which is [`Grounds::ReferenceClient`] and no stronger: what
+/// DISABLE looks like has not been seen.
+fn decode_upscaling_status(message: &Message) -> Option<Reading> {
+    if message.kind? != 0x01 || message.len != 3 {
+        return None;
+    }
+    let available = Switch::from_enable_disable(*message.body.first()?);
+    Some(Reading::UpscalingStatus { available })
+}
+
+/// `AudioRetParamConnection` (T1:2801) and
+/// `AudioRetParamConnectionWithLdacStatus` (T1:2814): the link priority.
+///
+/// TWO TYPES, ONE LAYOUT, DIFFERENT GROUNDS:
+///
+///   0x02  CONNECTION_MODE_WITH_LDAC_STATUS. The RET, the SET (T1:3084) and
+///         the NTFY (T1:2637) all PIN the type with `CODEGEN EnumRange` and
+///         are field-identical: command, type, `PriorMode`. HEADER ONLY, but
+///         the strongest header-only there is -- a pinned triple.
+///   0x00  CONNECTION_MODE. The RET's type is `Ignore`, not pinned, and the
+///         NTFY twin (`AudioNtfyParamConnection`, T1:2609) declares a
+///         different default type altogether. What makes 0x00 readable is the
+///         reference client: libmdr asks `e6 00` and reads the reply as this
+///         struct when a headset advertises t1 0xE1
+///         (`HeadphonesV2.cpp:179-181`, `HeadphonesV2T1.cpp:598-613`).
+///
+/// No capture holds either: the WF-1000XM5 advertises neither 0xE1 nor 0xE3.
+/// Three bytes at either type and nothing else -- 0x05, the LE Audio form, is
+/// four bytes with the `value2` the encoder refuses over, and is not read.
+fn decode_connection(message: &Message) -> Option<Reading> {
+    let kind = message.kind?;
+    if !matches!(kind, 0x00 | 0x02) || message.len != 3 {
+        return None;
+    }
+    Some(Reading::Connection { kind, prior: PriorMode::from_byte(*message.body.first()?) })
+}
+
+/// `RetPlayStatusPlaybackController` and its colliding twin, offsets 2 and 3.
+///
+/// CAPTURED: fixture 000065, `a3 01 00 02 00` -- ENABLE, PAUSE. See
+/// [`PlayStatusReport`] for why offset 4 is not read and [`AMBIGUOUS`] for why
+/// this key is no longer refused whole. libmdr reads the same message as
+/// `RetPlayStatusPlaybackController` and keeps `playbackStatus`
+/// (`HeadphonesV2T1.cpp:428-447`) -- the field this reads, and not the one in
+/// dispute.
+fn decode_play_status(message: &Message) -> Option<Reading> {
+    // PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT, five bytes. The
+    // `...WithCallVolumeAdjustmentAndFunctionChange` RET at the same type is
+    // six, and is not read: no capture holds one.
+    if message.kind? != 0x01 || message.len != 5 {
+        return None;
+    }
+    let control = Switch::from_enable_disable(*message.body.first()?);
+    let status = PlaybackStatus::from_byte(*message.body.get(1)?);
+    Some(Reading::PlayStatus(PlayStatusReport { control, status }))
 }
 
 /// `SystemRetParamSmartTalking` and `SystemRetExtParamSmartTalkingModeType2`.
@@ -1993,6 +2197,7 @@ pub const CAPTURED: &[Key] = &[
     (T1, 0x23, 0x0A),
     (T1, 0x57, 0x00),
     (T1, 0x67, 0x17),
+    (T1, 0xA3, 0x01),
     (T1, 0xA7, 0x20),
     (T1, 0xD1, 0xD1),
     (T1, 0xD1, 0xD2),
@@ -2024,6 +2229,19 @@ pub const OTHER_GROUNDS: &[(Key, Grounds, &str)] = &[
         (T1, 0x67, 0x22),
         Grounds::ReferenceClient,
         "libmdr HeadphonesV2T1.cpp HandleNcAsmParamT1, ASM_SEAMLESS",
+    ),
+    // Fixture 000097 holds these bytes; what the byte MEANS at this type is
+    // libmdr's reading, which is why this is not in CAPTURED. See
+    // `decode_upscaling_status`.
+    (
+        (T1, 0xE3, 0x01),
+        Grounds::ReferenceClient,
+        "libmdr HeadphonesV2T1.cpp HandleAudioStatusT1, UPSCALING as AudioRetStatusCommon",
+    ),
+    (
+        (T1, 0xE7, 0x00),
+        Grounds::ReferenceClient,
+        "libmdr HeadphonesV2T1.cpp HandleAudioParamT1, CONNECTION_MODE as AudioRetParamConnection",
     ),
 ];
 

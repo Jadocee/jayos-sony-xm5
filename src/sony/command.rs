@@ -191,18 +191,14 @@ pub fn parse_words(words: &[&str]) -> Result<Command, String> {
         // ARRIVED, not that it was honoured, and no field anywhere in the
         // protocol distinguishes the two.
         //
-        // `connection` never reaches the wire at all. It parses here and
-        // `encode`'s `Verb::ConnectionPriority` arm refuses it
-        // unconditionally -- named rather than given a line number, because
-        // the line moved the moment two verbs were added above it -- because
-        // the only
-        // connection function this device family advertises leads to a SET
-        // whose fourth byte the reference calls `value2` and never explains,
-        // and we do not guess at bytes. So nothing is sent, nothing is ACKed,
-        // and there is nothing for an owner to re-test -- which the earlier
-        // draft invited, impossibly. Their evidence does say the device would
-        // discard it even if we did encode it, so the refusal costs nothing but
-        // is OURS and stands on its own reason.
+        // `connection` never reaches the wire on the captured device family.
+        // It parses here, and `encode`'s `encode_connection` refuses it for a
+        // headset whose only connection function is the LE Audio form (t1
+        // 0xE7) -- named rather than given a line number, because the line
+        // moves -- because that SET's fourth byte is the `value2` the
+        // reference never explains, and we do not guess at bytes. A headset
+        // that answers at one of the two three-byte forms (0x02, 0x00) is
+        // written in that form since plan 23; neither has been seen to stick.
         //
         // Both stay accepted at this layer deliberately: the error strings on
         // this socket are a contract with the C++ daemon (see the module

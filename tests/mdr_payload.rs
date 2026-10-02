@@ -541,29 +541,23 @@ fn a_volume_the_device_cannot_produce_is_refused() {
 
 #[test]
 fn an_ambiguous_key_is_refused_by_name_rather_than_guessed() {
-    // PLAY_RET_STATUS, PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT, five
-    // bytes. Two structs claim it and read byte 4 as different things; no
-    // capture settles which, so a decoder that picked one would produce a
-    // plausible value from the wrong byte forever.
-    match payload::decode(MDR, &[0xA3, 0x01, 0x00, 0x00, 0x00]) {
+    // NCASM_NTFY_PARAM, NC_ON_OFF_AND_ASM_SEAMLESS, seven bytes. Two structs
+    // claim it and read byte 6 as different things -- an on/off value in one
+    // and the ambient level in the other -- and no capture settles which, so a
+    // decoder that picked one would produce a plausible value from the wrong
+    // byte forever.
+    //
+    // It is in the NTFY family only: both NTFY structs are seven bytes while
+    // the two RET structs are six and seven. So the same kind and length under
+    // NCASM_RET_PARAM is NOT ambiguous, and refusing it would refuse a
+    // decodable message.
+    match payload::decode(MDR, &[0x69, 0x13, 0, 0, 0, 0, 0]) {
         Reading::Ambiguous { command, kind, len, between } => {
-            assert_eq!(command, 0xA3);
-            assert_eq!(kind, Some(0x01));
-            assert_eq!(len, 5);
-            assert!(between[0].contains("PlaybackControlWithFunctionChange"));
-            assert!(between[1].contains("PlaybackController"));
+            assert_eq!((command, kind, len), (0x69, Some(0x13), 7));
+            assert_eq!(between, ["NcAsmNtfyParamNcOnOffAsmOnOff", "NcAsmNtfyParamNcOnOffAsmSeamless"]);
         }
         other => panic!("an ambiguous key decoded as {other:?}"),
     }
-
-    // The NC/ASM one is in the NTFY family only: both NTFY structs are seven
-    // bytes while the two RET structs are six and seven. So the same kind and
-    // length under NCASM_RET_PARAM is NOT ambiguous, and refusing it would
-    // refuse a decodable message.
-    assert!(matches!(
-        payload::decode(MDR, &[0x69, 0x13, 0, 0, 0, 0, 0]),
-        Reading::Ambiguous { .. }
-    ));
     assert!(
         !matches!(payload::decode(MDR, &[0x67, 0x13, 0, 0, 0, 0, 0]), Reading::Ambiguous { .. }),
         "the RET family is not ambiguous at this key"
@@ -607,14 +601,18 @@ fn every_capture_decodes_to_something_rather_than_panicking() {
     // settings stopped being asked for and dropped: `feature_gets` had queried
     // them since the support tables were decoded, and nothing read the answers.
     // Then 18 -> 19 when table-two paired devices (fixture 000077) was added.
-    assert_eq!(decoded, 19, "captures this port currently understands");
-    // And ONE that a real device sent onto an ambiguous key. See below.
-    assert_eq!(ambiguous, 1);
-    assert_eq!(unhandled, 50);
+    // Then 19 -> 21 for plan 23: the play status (000065), read only where its
+    // two structs agree, and the upscaling status (000097), read the way the
+    // reference client reads it.
+    assert_eq!(decoded, 21, "captures this port currently understands");
+    // The one frame a real device sent onto an ambiguous key is now read on
+    // the half both structs agree on; see below.
+    assert_eq!(ambiguous, 0);
+    assert_eq!(unhandled, 49);
 }
 
 #[test]
-fn the_corpus_itself_lands_on_an_ambiguous_key() {
+fn the_corpus_play_status_is_read_only_where_its_two_structs_agree() {
     // The strongest evidence that the (command, type, LENGTH) analysis was
     // worth doing: the ambiguity is not a theoretical property of the header.
     // A real WF-1000XM5 sent this frame, and two structs in the reference both
@@ -623,20 +621,50 @@ fn the_corpus_itself_lands_on_an_ambiguous_key() {
     assert_eq!(payloads.len(), 1);
     assert_eq!(payloads[0].as_slice(), &[0xA3, 0x01, 0x00, 0x02, 0x00]);
 
-    assert!(matches!(payload::decode(MDR, &payloads[0]), Reading::Ambiguous { .. }));
-
     // And the capture does NOT settle it. Byte 4 is 0x00, which is
-    // MusicCallStatus::MUSIC under one reading and EnableDisable::DISABLE
-    // under the other -- both entirely plausible for an idle device. A second
-    // frame with a 1 there would settle it; this corpus has no second frame.
+    // MusicCallStatus::MUSIC under one reading and EnableDisable::ENABLE under
+    // the other -- both entirely plausible for an idle device. A second frame
+    // with a 1 there would settle it; this corpus has no second frame.
     assert_eq!(payloads[0][4], 0x00, "the byte the two structs disagree about");
 
     // What the two DO agree on: offsets 0 through 3 are Command,
     // PlayInquiredType, EnableDisable, PlaybackStatus in both. So byte 3 is
-    // PlaybackStatus::PAUSE (0x02) whichever struct this is, and a later
-    // decoder can report the playback state while still refusing the last
-    // byte. That is left for whoever adds playback decoding, with a capture.
-    assert_eq!(payloads[0][3], 0x02, "PlaybackStatus::PAUSE, unambiguously");
+    // PlaybackStatus::PAUSE (0x02) whichever struct this is -- plan 23, item 5
+    // -- and that half is what is read.
+    let want = Reading::PlayStatus(payload::PlayStatusReport {
+        control: Switch::On,
+        status: payload::PlaybackStatus::Pause,
+    });
+    assert_eq!(payload::decode(MDR, &payloads[0]), want);
+    assert_eq!(payload::PlaybackStatus::Pause.as_str(), "paused");
+
+    // THE DISPUTED BYTE IS NEVER READ: every value at offset 4 decodes to the
+    // same thing. A decoder that picked a struct would fail here on the first
+    // value its enum does not name.
+    for byte in 0u8..=255 {
+        assert_eq!(payload::decode(MDR, &[0xA3, 0x01, 0x00, 0x02, byte]), want, "offset 4 = {byte:#04x}");
+    }
+    // The NTFY reads as the RET does; the two families agree at offsets 0..=3.
+    assert_eq!(payload::decode(MDR, &[0xA5, 0x01, 0x00, 0x02, 0x01]), want);
+
+    // The other fields: DISABLE at offset 2 is the headset saying it will not
+    // take a transport command, and PlaybackStatus's four values are the C++
+    // daemon's words, with UNSETTLED and anything unnamed as `unknown`.
+    match payload::decode(MDR, &[0xA3, 0x01, 0x01, 0x01, 0x00]) {
+        Reading::PlayStatus(r) => {
+            assert_eq!(r.control, Switch::Off);
+            assert_eq!(r.status.as_str(), "playing");
+        }
+        other => panic!("decoded as {other:?}"),
+    }
+    let word = |byte: u8| match payload::decode(MDR, &[0xA3, 0x01, 0x00, byte, 0x00]) {
+        Reading::PlayStatus(r) => r.status.as_str(),
+        other => panic!("decoded as {other:?}"),
+    };
+    assert_eq!([0x00u8, 0x01, 0x02, 0x03, 0xFF].map(word), ["unknown", "playing", "paused", "stopped", "unknown"]);
+
+    // Six bytes is the other RET at this type, which no capture holds.
+    assert!(matches!(payload::decode(MDR, &[0xA3, 0x01, 0, 2, 0, 0]), Reading::Unhandled { .. }));
 }
 
 #[test]
@@ -698,11 +726,17 @@ fn the_dsee_frames_say_which_upscaler_and_whether_it_is_on() {
         enabled: None,
     }));
 
-    // AUDIO_RET_STATUS arrives at the same inquired type and is deliberately
-    // not decoded: no struct in the reference declares that key.
+    // AUDIO_RET_STATUS arrives at the same inquired type, and is read as
+    // libmdr reads it: `AudioRetStatusCommon`, whose type is unpinned, with
+    // ENABLE (0x00) meaning DSEE can run. Plan 23, item 10. The NTFY (0xE5)
+    // is `AudioNotifyStatusCommon`, the same three fields.
     let status = payloads_for("AUDIO_RET_STATUS");
     assert_eq!(status[0], vec![0xE3, 0x01, 0x00]);
-    assert!(matches!(payload::decode(MDR, &status[0]), Reading::Unhandled { .. }));
+    assert_eq!(payload::decode(MDR, &status[0]), Reading::UpscalingStatus { available: Switch::On });
+    assert_eq!(payload::decode(MDR, &[0xE5, 0x01, 0x01]), Reading::UpscalingStatus { available: Switch::Off });
+    assert_eq!(payload::grounds(MDR, &status[0]), Some(payload::Grounds::ReferenceClient));
+    // At any other type it is not this message.
+    assert!(matches!(payload::decode(MDR, &[0xE3, 0x02, 0x00]), Reading::Unhandled { .. }));
 
     // A NOTIFY of the setting decodes as the RET does; the header's two
     // structs were compared field for field.
@@ -1052,4 +1086,38 @@ fn each_nc_asm_layout_reports_what_it_stands_on() {
     assert_eq!(g(&[0x61, 0x17, 0x01, 0x00, 0x01, 0x14, 0x01]), Some(Grounds::HeaderOnly));
     // A volunteered change stands where its reply does.
     assert_eq!(g(&[0x69, 0x15, 0x01, 0x01, 0x01, 0x01, 0x07]), Some(Grounds::ThirdParty));
+}
+
+#[test]
+fn the_connection_mode_is_read_at_both_of_its_types_and_no_other() {
+    // PLAN 23, ITEM 4. HEADER ONLY at 0x02, where the RET, SET and NTFY all
+    // pin the type; REFERENCE CLIENT at 0x00, where libmdr reads exactly this.
+    // No capture holds either -- the WF-1000XM5 advertises neither 0xE1 nor
+    // 0xE3 -- so these bytes are synthetic.
+    use payload::PriorMode;
+    for (bytes, kind, prior, word) in [
+        (&[0xE7u8, 0x02, 0x00][..], 0x02u8, PriorMode::SoundQuality, "quality"),
+        (&[0xE7, 0x02, 0x01], 0x02, PriorMode::ConnectionQuality, "stable"),
+        (&[0xE9, 0x02, 0x01], 0x02, PriorMode::ConnectionQuality, "stable"),
+        (&[0xE7, 0x00, 0x00], 0x00, PriorMode::SoundQuality, "quality"),
+        (&[0xE9, 0x00, 0x01], 0x00, PriorMode::ConnectionQuality, "stable"),
+        // LOW_LATENCY_PRIOR_BETA has no word in the C++ daemon's document.
+        (&[0xE7, 0x02, 0x02], 0x02, PriorMode::LowLatencyBeta, "unknown"),
+    ] {
+        assert_eq!(payload::decode(MDR, bytes), Reading::Connection { kind, prior }, "{bytes:02x?}");
+        assert_eq!(prior.as_str(), word);
+    }
+    assert_eq!(payload::grounds(MDR, &[0xE7, 0x02, 0x01]), Some(payload::Grounds::HeaderOnly));
+    assert_eq!(payload::grounds(MDR, &[0xE7, 0x00, 0x01]), Some(payload::Grounds::ReferenceClient));
+
+    // The LE Audio form (0x05) is four bytes with the unexplained `value2`,
+    // and is not read; nor is a three-byte reply at any other type, nor the
+    // same bytes on table 2.
+    for bytes in [&[0xE7u8, 0x05, 0x00, 0x00][..], &[0xE7, 0x03, 0x00], &[0xE7, 0x02, 0x00, 0x00]] {
+        assert!(matches!(payload::decode(MDR, bytes), Reading::Unhandled { .. }), "{bytes:02x?}");
+    }
+    assert!(matches!(payload::decode(DataType::DataMdrNo2, &[0xE7, 0x02, 0x00]), Reading::Unhandled { .. }));
+    // And the DSEE param reply at UPSCALING is still DSEE: the type, not the
+    // command, separates the two.
+    assert!(matches!(payload::decode(MDR, &[0xE7, 0x01, 0x01]), Reading::Dsee(_)));
 }

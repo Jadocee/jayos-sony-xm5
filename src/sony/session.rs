@@ -819,6 +819,17 @@ impl Session {
             payload::Reading::Codec(codec) => {
                 self.state.device.codec = codec.as_str().to_string();
             }
+            payload::Reading::Connection { prior, .. } => {
+                self.state.connection.priority = prior.as_str().to_string();
+            }
+            payload::Reading::PlayStatus(report) => {
+                self.state.playback.status = report.status.as_str().to_string();
+            }
+            payload::Reading::UpscalingStatus { available } => {
+                // `null` stays `null` for a byte EnableDisable does not name:
+                // "the headset said something else" is not "unavailable".
+                self.state.dsee_available = available.as_bool();
+            }
             payload::Reading::Dsee(report) => {
                 if let Some(switch) = report.enabled {
                     if let Some(on) = switch.as_bool() {

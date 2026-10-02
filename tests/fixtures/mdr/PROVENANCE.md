@@ -229,10 +229,20 @@ Four are on commands the captured corpus carries:
     sound level. No capture settles it.
 
 0xa3 / 0xa5  PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT  len 5
-    RetPlayStatusPlaybackControlWithFunctionChange  offset 4 is MusicCallStatus
-    RetPlayStatusPlaybackController                 offset 4 is EnableDisable
+    RetPlayStatusPlaybackControlWithFunctionChange  offset 4 is EnableDisable
+    RetPlayStatusPlaybackController                 offset 4 is MusicCallStatus
     REAL. No capture settles it.
 ```
+
+The last pair was first written down the other way round -- each struct given
+the other's offset-4 field. T1:7434-7446 and T1:7451-7463 say it as above.
+
+**Plan 23 (2026-10-02) decided the play-status pair without settling it.** The
+two structs agree field for field on offsets 2 and 3 (`EnableDisable status`,
+`PlaybackStatus playbackStatus`), and those are all the state document needs.
+`decode_play_status` reads exactly those two and never offset 4, and
+`the_corpus_play_status_is_read_only_where_its_two_structs_agree` holds that
+every value of offset 4 decodes the same. The collision itself stands.
 
 The remaining seventeen are on firmware update (0x31–0x39), TWS topology
 (0x43–0x49), SAR (0xb8/0xb9) and general settings (0xd7–0xd9) — none of which
@@ -412,12 +422,15 @@ Two smaller notes from the same pass:
   instance of "the type defaults are not always the real discriminator", and
   another reason the dispatch key is `(command, type, length)` read off the
   payload rather than off the struct's defaults.
-* `AUDIO_RET_STATUS` at `UPSCALING` (fixture `000097`, `e3 01 00`) is decoded
-  by nothing here: **no struct in the reference declares that key.**
-  `AudioRetStatusCommon` declares CONNECTION_MODE, and the only upscaling
-  status struct is the `*_WITH_STATUS_DISABLE_REASON` variant at a different
-  inquired type. Its third byte is an `EnableDisable` by shape and by nothing
-  else, and the state document has no field for it.
+* `AUDIO_RET_STATUS` at `UPSCALING` (fixture `000097`, `e3 01 00`) was
+  decoded by nothing here, on the argument that no struct declares that key
+  because `AudioRetStatusCommon` defaults its type to CONNECTION_MODE. **That
+  argument was wrong** (plan 23, 2026-10-02): the field is `CODEGEN Ignore`,
+  not `EnumRange`, so the default is not a pin -- this file's own rule, below
+  -- and libmdr reads exactly `AudioRetStatusCommon` at UPSCALING and keeps
+  `status == ENABLE` as "upscaling available" (`HeadphonesV2T1.cpp:564-579`).
+  It is decoded now, on reference-client grounds, and published as
+  `dsee_available`.
 
 ## The command byte is table-scoped too, and that was a real bug
 
@@ -567,17 +580,19 @@ match, which is what this module exists not to trust.
 `RetPlayStatusPlaybackController` (T1:7451) is five, ending in a
 `PlaybackStatus` and a `MusicCallStatus`. The two enums share value names
 across different bytes — `PAUSE` is 0x01 in one and 0x02 in the other — so
-there is nothing to mirror it against. It is emitted at `HeaderOnly` and says
-so on the value.
+there is nothing to mirror it against. It was emitted at `HeaderOnly`; since
+plan 23 it is `ReferenceClient`, because libmdr sends the same four bytes
+(`HeadphonesV2.cpp:438-443`), and is gated on the support table and on the
+headset's own play-status reply.
 
 Its four transport words do rest on the strongest single citation in the
 reference: `// CODEGEN EnumRange PlaybackControl::PAUSE PlaybackControl::TRACK_UP
 PlaybackControl::TRACK_DOWN PlaybackControl::PLAY` restricts the field to
 exactly those four, which settles `next`/`previous` as TRACK_UP/TRACK_DOWN and
-not GROUP_UP/GROUP_DOWN. What it does not settle is offset 2, an
+not GROUP_UP/GROUP_DOWN. What the header does not settle is offset 2, an
 `EnableDisable` with no EnumRange, no comment and an unpinned default — the
 one byte in the module that is neither named by a verb nor echoed from a
-reading.
+reading. The reference client settles it: ENABLE, 0x00, on every write.
 
 ### The preset table, and the swap it avoids
 
@@ -591,13 +606,16 @@ drift.
 
 ### What is not built, and what would settle each
 
-* **`connection quality|stable`** — refused by name on every device. Four gaps:
-  no capture in either direction; no `Reading::Connection` to confirm a write;
-  no `AudioRetParam*` pinned at `CONNECTION_MODE` (0x00); and the only
-  connection function the captured family advertises (t1 0xE7) leads to a SET
-  whose fourth byte the reference names `value2` and never explains. **Settled
-  by**: one WH-1000XM5 support table plus an `AUDIO_RET_PARAM` at whichever
-  connection type it answers.
+* **`connection quality|stable`** — refused by name on every device, until
+  plan 23 (2026-10-02). It is written now to a headset that has answered at a
+  connection type: `e8 02 <mode>` after a reply at 0x02 (header-only, a
+  pinned field-identical RET/SET/NTFY triple) and `e8 00 <mode>` after one at
+  0x00 (third party: mos9527's PR #64, on a WF-LC900). Still refused by name:
+  a headset whose only connection function is t1 0xE7 -- the captured family
+  -- because that SET's fourth byte is the `value2` the reference never
+  explains. **Settled by**: one WH-1000XM5 support table plus an
+  `AUDIO_RET_PARAM` at whichever connection type it answers, and one write
+  that sticks.
 * **Any NcAsm SET at an unpinned key** — `(0x68, 0x01)` with a 4-, 6-, 7- or
   8-byte body. Four structs carry `// CODEGEN Ignore OUT_OF_RANGE is expected`
   above their type field, so their `NC_ON_OFF = 0x01` is nothing but the enum's

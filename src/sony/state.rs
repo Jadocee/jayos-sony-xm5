@@ -521,6 +521,11 @@ pub struct State {
     /// reference's shape so `sony_contract.rs` can subtract them. A page
     /// draws its level control from this rather than from a 20 of its own.
     pub ambient_range: AmbientRange,
+    /// Whether DSEE can run now, as the headset's AUDIO_RET_STATUS at
+    /// UPSCALING says -- `null` until it has. Plan 23, item 10. Top level for
+    /// the reason `ambient_range` is: `equalizer` is the C++ daemon's object.
+    /// A page uses it to say why a DSEE switch that is on is doing nothing.
+    pub dsee_available: Option<bool>,
     /// The last thing that went wrong, or empty. A page shows this instead of
     /// looking broken when there is nothing to show.
     pub last_error: String,
@@ -562,6 +567,7 @@ impl Default for State {
             general_settings: Vec::new(),
             paired_devices: Vec::new(),
             ambient_range: AmbientRange::default(),
+            dsee_available: None,
             last_error: String::new(),
         }
     }
@@ -813,6 +819,15 @@ pub fn serialize(state: &State, daemon_version: &str) -> String {
         r.max,
         r.step,
         if r.from_device { "device" } else { "compat" }
+    );
+    let _ = write!(
+        out,
+        ",\"dsee_available\":{}",
+        match state.dsee_available {
+            Some(true) => "true",
+            Some(false) => "false",
+            None => "null",
+        }
     );
     let _ = write!(out, ",\"last_error\":\"{}\"}}", json_escape(&state.last_error));
     // The trailing newline is part of the document: the file ends in exactly

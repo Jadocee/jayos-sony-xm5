@@ -452,16 +452,18 @@ fn nothing_is_emitted_without_the_state_it_must_echo() {
         Verb::Dsee(true),
         Verb::EqualizerPreset("rock".into()),
         Verb::Volume(50),
+        // `playback` echoes nothing, and used to be the one device verb that
+        // encoded from nothing for that reason. It is gated on the support
+        // table now (plan 23, item 5), so a headset that has said nothing is
+        // refused it like every other.
+        Verb::Playback("play".into()),
+        Verb::ConnectionPriority("quality".into()),
     ] {
         match encode::encode(&blank, &verb) {
             Err(Refusal::NotRead { .. }) | Err(Refusal::NotAdvertised { .. }) => {}
             other => panic!("{verb:?} produced {other:?} from a headset that has said nothing"),
         }
     }
-    // `playback` needs no echo -- it carries no state -- so it is the one
-    // device verb that encodes from nothing, and that is stated rather than
-    // accidental.
-    assert!(encode::encode(&blank, &Verb::Playback("play".into())).is_ok());
 }
 
 #[test]
@@ -684,19 +686,122 @@ fn the_polarity_inverses_are_literal() {
 }
 
 #[test]
-fn the_header_only_verb_says_so() {
-    // `playback` is the one verb with no field-identical twin, so nothing can
-    // mirror it. It must not claim otherwise.
-    let out = encode::encode(&Facts::blank(), &Verb::Playback("pause".into())).expect("a frame");
-    assert_eq!(out.evidence.tier(), "header-only");
-    assert!(matches!(out.evidence, Evidence::HeaderOnly { .. }));
+fn the_playback_verb_stands_on_the_reference_client_and_says_so() {
+    // PLAN 23, ITEM 5. `playback` has no field-identical twin, so nothing can
+    // mirror it -- but libmdr sends these four bytes, ENABLE at offset 2
+    // included (`HeadphonesV2.cpp:438-443`), so it is no longer header-only.
+    let facts = captured_facts();
+    let out = encode::encode(&facts, &Verb::Playback("pause".into())).expect("a frame");
+    assert_eq!(out.evidence.tier(), "reference-client");
+    assert!(matches!(out.evidence, Evidence::ReferenceClient { set: "SetPlayStatusPlaybackController", .. }));
     // PlaybackControl: PAUSE = 0x01, PLAY = 0x07, TRACK_UP = 0x02,
     // TRACK_DOWN = 0x03. The reference restricts the field to exactly those
     // four, which is what settles next/previous as TRACK_* and not GROUP_*.
+    // Offset 2 is EnableDisable::ENABLE, which is 0x00.
     for (word, want) in [("play", 0x07u8), ("pause", 0x01), ("next", 0x02), ("previous", 0x03)] {
-        let out = encode::encode(&Facts::blank(), &Verb::Playback(word.to_string())).expect("a frame");
+        let out = encode::encode(&facts, &Verb::Playback(word.to_string())).expect("a frame");
         assert_eq!(out.payload, vec![0xA4, 0x01, 0x00, want], "{word}");
+        assert_eq!(out.ret_twin(), Some(0xA3));
     }
+
+    // Gated on the table: a headset advertising no playback controller is
+    // refused, one advertising any of 0xA1..=0xA4 is not.
+    assert!(matches!(
+        encode::encode(&only_table_one(&[0x12]), &Verb::Playback("play".into())),
+        Err(Refusal::NotAdvertised { .. })
+    ));
+    for function in 0xA1u8..=0xA4 {
+        assert!(encode::encode(&only_table_one(&[function]), &Verb::Playback("play".into())).is_ok());
+    }
+
+    // And on what it last said. DISABLE at offset 2 of its play-status reply
+    // -- the field both colliding RET structs agree on -- is the headset
+    // saying it will not take a transport command, and the write is refused.
+    // ENABLE there, as fixture 000065 carries, is not.
+    let mut disabled = only_table_one(&[0xA1]);
+    disabled.observe(DataType::DataMdr, &[0xA3, 0x01, 0x01, 0x02, 0x00]);
+    match encode::encode(&disabled, &Verb::Playback("play".into())) {
+        Err(refusal @ Refusal::Unavailable { .. }) => {
+            assert_eq!(refusal.clone().side(), Side::Device);
+            assert!(refusal.message().contains("DISABLE"), "{}", refusal.message());
+        }
+        other => panic!("a disabled controller produced {other:?}"),
+    }
+    let mut enabled = only_table_one(&[0xA1]);
+    enabled.observe(DataType::DataMdr, &payload_of("000065"));
+    assert!(encode::encode(&enabled, &Verb::Playback("play".into())).is_ok());
+    // A NTFY that re-enables it lifts the refusal.
+    disabled.observe(DataType::DataMdr, &[0xA5, 0x01, 0x00, 0x02, 0x00]);
+    assert!(encode::encode(&disabled, &Verb::Playback("play".into())).is_ok());
+}
+
+#[test]
+fn the_connection_mode_is_written_in_the_form_the_headset_answered_in() {
+    // PLAN 23, ITEM 4.
+    //
+    // Asked at one type: the LDAC form (0x02) on 0xE3, since its SET is the
+    // pinned one; else the plain form (0x00) on 0xE1; never on 0xE7.
+    let asked = |functions: &[u8]| -> Vec<Vec<u8>> {
+        encode::feature_gets(&only_table_one(functions))
+            .into_iter()
+            .filter(|g| g.command() == Some(0xE6) && matches!(g.kind(), Some(0x00 | 0x02 | 0x05)))
+            .map(|g| g.payload)
+            .collect()
+    };
+    assert_eq!(asked(&[0xE3]), vec![vec![0xE6, 0x02]]);
+    assert_eq!(asked(&[0xE1]), vec![vec![0xE6, 0x00]]);
+    assert_eq!(asked(&[0xE1, 0xE3]), vec![vec![0xE6, 0x02]]);
+    assert!(asked(&[0xE7]).is_empty(), "the LE Audio form is not asked");
+
+    // Advertised and not yet answered: the device side, not this port's.
+    for function in [0xE1u8, 0xE3] {
+        assert!(matches!(
+            encode::encode(&only_table_one(&[function]), &Verb::ConnectionPriority("quality".into())),
+            Err(Refusal::NotRead { .. })
+        ));
+    }
+
+    // Answered at 0x02: `e8 02 <PriorMode>`, HEADER ONLY -- the strongest
+    // kind, a pinned and field-identical RET/SET/NTFY triple -- and the SET
+    // with byte 0 swapped back to the RET decodes to what was asked for.
+    let mut ldac = only_table_one(&[0xE3]);
+    ldac.observe(DataType::DataMdr, &[0xE7, 0x02, 0x00]);
+    for (word, byte, prior) in [
+        ("quality", 0x00u8, payload::PriorMode::SoundQuality),
+        ("stable", 0x01, payload::PriorMode::ConnectionQuality),
+    ] {
+        let out = encode::encode(&ldac, &Verb::ConnectionPriority(word.into())).expect("a frame");
+        assert_eq!(out.payload, vec![0xE8, 0x02, byte], "{word}");
+        assert_eq!(out.evidence.tier(), "header-only");
+        assert_eq!(out.evidence.set(), "AudioSetParamConnectionWithLdacStatus");
+        assert_eq!(out.ret_twin(), Some(0xE7));
+        let mut back = out.payload.clone();
+        back[0] = 0xE7;
+        assert_eq!(payload::decode(DataType::DataMdr, &back), Reading::Connection { kind: 0x02, prior });
+    }
+
+    // Answered at 0x00: `e8 00 <PriorMode>`, THIRD PARTY -- the header's own
+    // `AudioSetParamConnection` pins 0x05, and the 0x00 form is mos9527's
+    // PR #64, reported on a WF-LC900.
+    let mut plain = only_table_one(&[0xE1]);
+    plain.observe(DataType::DataMdr, &[0xE7, 0x00, 0x01]);
+    let out = encode::encode(&plain, &Verb::ConnectionPriority("stable".into())).expect("a frame");
+    assert_eq!(out.payload, vec![0xE8, 0x00, 0x01]);
+    assert!(matches!(out.evidence, Evidence::ThirdParty { set: "AudioSetParamConnection", .. }));
+    assert!(out.evidence.tier() == "third-party");
+
+    // A headset with only the LE Audio form keeps the old refusal by name --
+    // the captured WF-1000XM5 is one, and `the_captured_device_gates_the_verbs
+    // _it_should` holds it -- and one with no connection mode at all is told
+    // so rather than that this port lacks a byte.
+    match encode::encode(&only_table_one(&[0xE7]), &Verb::ConnectionPriority("quality".into())) {
+        Err(Refusal::Undocumented { field: "value2", .. }) => {}
+        other => panic!("0xE7 alone produced {other:?}"),
+    }
+    assert!(matches!(
+        encode::encode(&only_table_one(&[0x12]), &Verb::ConnectionPriority("quality".into())),
+        Err(Refusal::NotAdvertised { .. })
+    ));
 }
 
 /// Every verb the command language can produce, with a representative
@@ -860,6 +965,18 @@ fn nothing_is_asked_that_the_device_did_not_advertise() {
         encode::feature_gets(&only_table_one(&[0x13])).iter().all(|q| q.command() != Some(0x12)),
         "UPSCALING_INDICATOR is not the codec gate"
     );
+
+    // DSEE's three queries at UPSCALING (0x01) are earned by
+    // UPSCALING_AUTO_OFF (0xE2) and not by its 0xED sibling, whose messages
+    // live at a different type (0x0B). libmdr gates them the same way.
+    let upscaling = |functions: &[u8]| -> usize {
+        encode::feature_gets(&only_table_one(functions))
+            .iter()
+            .filter(|q| matches!(q.command(), Some(0xE0 | 0xE2 | 0xE6)) && q.kind() == Some(0x01))
+            .count()
+    };
+    assert_eq!(upscaling(&[0xE2]), 3);
+    assert_eq!(upscaling(&[0xED]), 0, "0xED was asked at a type it does not answer at");
 
     // No query is asked twice.
     let mut keys: Vec<(u8, u8)> =

@@ -39,8 +39,10 @@
 //! `PlaybackControl`, while `RetPlayStatusPlaybackController` (T1:7451) is
 //! five ending in a `PlaybackStatus` and a `MusicCallStatus`. `PlaybackControl`
 //! and `PlaybackStatus` share value NAMES across different bytes, so there is
-//! nothing to mirror it against. It is emitted at [`Evidence::HeaderOnly`] and
-//! says so.
+//! nothing to mirror it against. It is emitted at
+//! [`Evidence::ReferenceClient`] -- libmdr sends the same four bytes -- and
+//! says so. `connection` has a pinned twin at one type and only another
+//! project's word at the other; see [`encode_connection`].
 //!
 //! A SET IS A WHOLE-STATE MESSAGE, WHICH IS THE RULE THIS MODULE IS BUILT ON
 //!
@@ -76,7 +78,7 @@
 
 use super::payload::{
     self, AmbientRange, Command, DseeReport, EqReport, GeneralSetting, NoiseMode, NoiseReport,
-    Reading, SpeakToChatReport, SupportFunction, Switch, Table,
+    PlayStatusReport, PriorMode, Reading, SpeakToChatReport, SupportFunction, Switch, Table,
 };
 use super::DataType;
 use crate::sony::command::{Command as Verb, EQ_PRESETS, MDR_VOLUME_MAX};
@@ -263,6 +265,9 @@ pub enum Refusal {
     /// A value outside the range the headset itself stated, or outside the
     /// compatibility range when it has stated none.
     OutOfDeviceRange { verb: &'static str, value: i32, min: u8, max: u8, step: u8 },
+    /// The headset has the feature and said, in its own last reply, that it
+    /// will not take it now.
+    Unavailable { verb: &'static str, said: &'static str },
     /// A verb with no device message behind it at all.
     NoEncoder { verb: &'static str, why: &'static str },
 }
@@ -276,7 +281,8 @@ impl Refusal {
             | Refusal::NotAdvertised { .. }
             | Refusal::UnknownVariant { .. }
             | Refusal::OutOfRange { .. }
-            | Refusal::OutOfDeviceRange { .. } => Side::Device,
+            | Refusal::OutOfDeviceRange { .. }
+            | Refusal::Unavailable { .. } => Side::Device,
             // These three are this port's gaps, not the headset's.
             Refusal::Ambiguous { .. }
             | Refusal::Undocumented { .. }
@@ -322,6 +328,9 @@ impl Refusal {
             Refusal::NoEncoder { verb, why } => {
                 format!("{verb}: this daemon sends no frame for it -- {why}")
             }
+            Refusal::Unavailable { verb, said } => {
+                format!("{verb}: this headset says it is unavailable now -- {said}")
+            }
         }
     }
 }
@@ -361,6 +370,12 @@ pub struct Facts {
     dsee: Option<Observed<DseeReport>>,
     equalizer: Option<Observed<EqReport>>,
     volume: Option<Observed<u8>>,
+    /// The link priority, at the type it was reported at -- which chooses the
+    /// SET. See [`encode_connection`].
+    connection: Option<Observed<PriorMode>>,
+    /// Whether the headset will take a transport command. See
+    /// [`encode_playback`].
+    play_status: Option<Observed<PlayStatusReport>>,
     /// The headset's named on/off settings, by slot.
     ///
     /// KEYED BY SLOT AND NOT BY NAME, because the slot is what a GET or a SET
@@ -383,6 +398,8 @@ impl Facts {
             dsee: None,
             equalizer: None,
             volume: None,
+            connection: None,
+            play_status: None,
             general: std::collections::BTreeMap::new(),
         }
     }
@@ -444,6 +461,12 @@ impl Facts {
             Reading::Volume { device_level } => {
                 self.volume = Some(Observed { kind, len: payload.len(), value: Some(device_level) })
             }
+            Reading::Connection { kind, prior } => {
+                self.connection = Some(Observed { kind, len: payload.len(), value: Some(prior) })
+            }
+            Reading::PlayStatus(report) => {
+                self.play_status = Some(Observed { kind, len: payload.len(), value: Some(report) })
+            }
             // TWO MESSAGES, ONE SLOT. The capability reply says what the
             // setting IS and the param reply says whether it is on; they arrive
             // as separate frames at the same inquired type, and a SET needs
@@ -473,7 +496,11 @@ impl Facts {
                 }
             }
             // No verb writes any of these, so the encoder keeps nothing.
-            Reading::Device(_) | Reading::Battery(_) | Reading::Codec(_) | Reading::PairedDevices(_) => {}
+            Reading::Device(_)
+            | Reading::Battery(_)
+            | Reading::Codec(_)
+            | Reading::PairedDevices(_)
+            | Reading::UpscalingStatus { .. } => {}
         }
     }
 
@@ -527,18 +554,8 @@ pub fn encode(facts: &Facts, verb: &Verb) -> Result<Outgoing, Refusal> {
         Verb::ClearBass(value) => encode_eq_steps(facts, "clear-bass", EqEdit::ClearBass(*value)),
         Verb::GeneralSetting { key, on } => encode_general_setting(facts, key, *on),
         Verb::Volume(percent) => encode_volume(facts, *percent),
-        Verb::Playback(word) => encode_playback(word),
-
-        // See `sony::state::Capabilities::apply_support_functions` for the
-        // long form. The short of it: the only connection function the
-        // captured device family advertises leads to a SET whose fourth byte
-        // the reference names `value2` and never explains, and no
-        // `AudioRetParam*` is pinned at its inquired type to confirm a write.
-        Verb::ConnectionPriority(_) => Err(Refusal::Undocumented {
-            verb: "connection",
-            field: "value2",
-            struct_name: "AudioSetParamConnectionModeClassicAudioLeAudio",
-        }),
+        Verb::Playback(word) => encode_playback(facts, word),
+        Verb::ConnectionPriority(word) => encode_connection(facts, word),
     }
 }
 
@@ -1063,7 +1080,7 @@ fn encode_volume(facts: &Facts, percent: i32) -> Result<Outgoing, Refusal> {
     ))
 }
 
-/// `SetPlayStatusPlaybackController` (T1:8013). HEADER ONLY.
+/// `SetPlayStatusPlaybackController` (T1:8013), the four bytes libmdr sends.
 ///
 /// The four transport words rest on the strongest single citation in the
 /// reference: `// CODEGEN EnumRange PlaybackControl::PAUSE
@@ -1071,15 +1088,23 @@ fn encode_volume(facts: &Facts, percent: i32) -> Result<Outgoing, Refusal> {
 /// -- the field is restricted to exactly those four, which settles that `next`
 /// and `previous` are TRACK_UP and TRACK_DOWN and not GROUP_UP and GROUP_DOWN.
 ///
-/// What it does NOT settle is offset 2, an `EnableDisable status` with no
-/// EnumRange, no comment and an unpinned default. ENABLE is 0x00 -- the
-/// inverted convention -- and this port sends it, which is the one byte in
-/// this module that is neither named by a verb nor echoed from a reading. It
-/// is called out here rather than buried because it is the exception to the
-/// module's own rule, and because there is no RET twin to mirror it against:
-/// `RetPlayStatusPlaybackController` (T1:7451) is five fields ending in a
-/// `PlaybackStatus` and a `MusicCallStatus`.
-fn encode_playback(word: &str) -> Result<Outgoing, Refusal> {
+/// OFFSET 2 IS THE ONE BYTE IN THIS MODULE NEITHER NAMED NOR ECHOED, and what
+/// stands behind it is the reference client rather than the header: libmdr
+/// fills `status = EnableDisable::ENABLE` (0x00) on every transport write
+/// (`HeadphonesV2.cpp:438-443`), and people drive real headsets with it. The
+/// header alone gives the field no EnumRange and no comment. This used to call
+/// itself header-only and say so; with the client's bytes in hand it is
+/// [`Evidence::ReferenceClient`], and still not a mirror: there is no RET twin
+/// to round-trip through.
+///
+/// GATED ON WHAT THE HEADSET SAID, in two ways. It must advertise a playback
+/// controller (t1 0xA1..=0xA4), and when its last play-status reply put
+/// DISABLE in the same offset-2 field, the write is refused: the headset has
+/// said it will not take one now. Offset 2 of that reply is a field both
+/// colliding RET structs agree on -- see `payload::PlayStatusReport` -- and
+/// fixture 000065 carries ENABLE there. No reply yet is not a refusal: the
+/// write echoes nothing from it, so it has nothing to wait for.
+fn encode_playback(facts: &Facts, word: &str) -> Result<Outgoing, Refusal> {
     let verb = "playback";
     // PlaybackControl (T1:1284). PAUSE = 0x01 and PLAY = 0x07; PlaybackStatus
     // is a DIFFERENT enum with overlapping names at different bytes, and
@@ -1091,16 +1116,100 @@ fn encode_playback(word: &str) -> Result<Outgoing, Refusal> {
         "previous" => 0x03, // TRACK_DOWN
         other => return Err(Refusal::NoEncoder { verb, why: leaked(other) }),
     };
+    if !facts.advertises_one(&[0xA1, 0xA2, 0xA3, 0xA4]) {
+        return Err(Refusal::NotAdvertised { verb, feature: "a playback controller (t1 0xA1..0xA4)" });
+    }
+    if let Some(report) = facts.play_status.as_ref().and_then(|o| o.value) {
+        if report.control == Switch::Off {
+            return Err(Refusal::Unavailable {
+                verb,
+                said: "PLAY_RET_STATUS put DISABLE in its control field",
+            });
+        }
+    }
     Ok(Outgoing::new(
         DataType::DataMdr,
-        Evidence::HeaderOnly {
+        Evidence::ReferenceClient {
             set: "SetPlayStatusPlaybackController",
-            unverified: "offset 2, an EnableDisable with no EnumRange and no RET twin to mirror",
+            cite: "libmdr HeadphonesV2.cpp:438-443, status = EnableDisable::ENABLE",
         },
         0xA4,
         0x01,
-        &[0x00, control],
+        &[ENABLE, control],
     ))
+}
+
+/// `EnableDisable::ENABLE` (`ProtocolV2.hpp:16`). Inverted: 0x00.
+const ENABLE: u8 = 0x00;
+
+/// The link-priority write, in the form the headset last answered in.
+///
+/// THE TYPE IS THE HEADSET'S, as for NC/ASM, and the two it can answer at
+/// stand on different grounds:
+///
+///   0x02  `AudioSetParamConnectionWithLdacStatus` (T1:3084). The RET
+///         (T1:2814), this SET and the NTFY (T1:2637) all pin the type with
+///         `CODEGEN EnumRange` and are field-identical: command, type,
+///         `PriorMode`. HEADER ONLY -- no capture either way -- but a pinned
+///         triple is the strongest header-only there is.
+///   0x00  `AudioSetParamConnection` (T1:3056) at CONNECTION_MODE, which is
+///         NOT what the header declares: that struct pins its type to 0x05,
+///         the LE Audio form, and libmdr sends it unchanged -- `e8 05 <mode>`
+///         (`HeadphonesV2.cpp:664-673`), three bytes at a type whose own SET
+///         is four. mos9527/SonyHeadphonesClient PR #64 changed it to
+///         `e8 00 <mode>` and reports that working on a WF-LC900. THIRD PARTY,
+///         and on a different headset; it is sent only to a headset that has
+///         itself answered at 0x00, so the type is at least its own.
+///
+/// WHAT IS STILL REFUSED. A headset that has not answered gets `NotRead` when
+/// it advertises t1 0xE1 or 0xE3 (the GET is in [`feature_gets`]). One that
+/// advertises only 0xE7, the LE Audio form -- the captured WF-1000XM5 -- gets
+/// the old refusal by name: that SET's fourth byte is the `value2` the
+/// reference never explains (`sony::state` `apply_support_functions` has the
+/// long form). Nothing else is a connection mode this port knows.
+fn encode_connection(facts: &Facts, word: &str) -> Result<Outgoing, Refusal> {
+    let verb = "connection";
+    let prior = match word {
+        "quality" => PriorMode::SoundQuality,
+        "stable" => PriorMode::ConnectionQuality,
+        other => return Err(Refusal::NoEncoder { verb, why: leaked(other) }),
+    };
+    match facts.connection.as_ref() {
+        Some(Observed { kind: 0x02, len: 3, .. }) => Ok(Outgoing::new(
+            DataType::DataMdr,
+            Evidence::HeaderOnly {
+                set: "AudioSetParamConnectionWithLdacStatus",
+                unverified: "no frame either way; RET, SET and NTFY pin the type and agree field for field",
+            },
+            0xE8,
+            0x02,
+            &[prior.to_byte()],
+        )),
+        Some(Observed { kind: 0x00, len: 3, .. }) => Ok(Outgoing::new(
+            DataType::DataMdr,
+            Evidence::ThirdParty {
+                set: "AudioSetParamConnection",
+                source: "mos9527/SonyHeadphonesClient PR #64: e8 00 <mode>, reported on a WF-LC900",
+            },
+            0xE8,
+            0x00,
+            &[prior.to_byte()],
+        )),
+        Some(observed) => Err(Refusal::UnknownVariant {
+            verb,
+            family: "AUDIO_RET_PARAM's connection mode",
+            observed: observed.kind,
+        }),
+        None if facts.advertises_one(&[0xE1, 0xE3]) => {
+            Err(Refusal::NotRead { verb, needs: "AUDIO_GET_PARAM at its connection mode" })
+        }
+        None if facts.advertises_one(&[0xE7]) => Err(Refusal::Undocumented {
+            verb,
+            field: "value2",
+            struct_name: "AudioSetParamConnectionModeClassicAudioLeAudio",
+        }),
+        None => Err(Refusal::NotAdvertised { verb, feature: "a connection mode (t1 0xE1, 0xE3 or 0xE7)" }),
+    }
 }
 
 // ── asking ───────────────────────────────────────────────────────────────────
@@ -1200,10 +1309,25 @@ pub fn feature_gets(facts: &Facts) -> Vec<Outgoing> {
         out.push(get(DataType::DataMdr, 0xA6, 0x20, "PlayGetParam"));
         out.push(get(DataType::DataMdr, 0xA2, 0x01, "PlayGetStatus"));
     }
-    if facts.advertises_one(&[0xE2, 0xED]) {
+    // AUDIO_*_* at UPSCALING (0x01), on UPSCALING_AUTO_OFF (0xE2) ALONE. This
+    // also asked for 0xED once, and 0xED's messages live at a different type
+    // -- UPSCALING_AUTO_OFF_WITH_STATUS_DISABLE_REASON, 0x0B, a status and a
+    // reason list -- so a headset advertising only that one was asked at a
+    // type it has no reason to answer. libmdr gates the same three on 0xE2
+    // (`HeadphonesV2.cpp:83-86,184-188`).
+    if facts.advertises_one(&[0xE2]) {
         out.push(get(DataType::DataMdr, 0xE0, 0x01, "AudioGetCapability"));
         out.push(get(DataType::DataMdr, 0xE2, 0x01, "AudioGetStatus"));
         out.push(get(DataType::DataMdr, 0xE6, 0x01, "AudioGetParam"));
+    }
+    // AUDIO_GET_PARAM at the connection mode, and only one: the LDAC form
+    // (0x02) when 0xE3 is advertised, since its SET is the pinned one, else
+    // the plain form (0x00) on 0xE1, as libmdr asks (`HeadphonesV2.cpp:
+    // 179-181`). The reply's type is what `encode_connection` then writes at.
+    if facts.advertises_one(&[0xE3]) {
+        out.push(get(DataType::DataMdr, 0xE6, 0x02, "AudioGetParam"));
+    } else if facts.advertises_one(&[0xE1]) {
+        out.push(get(DataType::DataMdr, 0xE6, 0x00, "AudioGetParam"));
     }
     // COMMON_GET_STATUS at AUDIO_CODEC, gated on t1 CODEC_INDICATOR (0x12,
     // `ProtocolV2.hpp`), which the captured table 1 advertises. Where the
