@@ -3,6 +3,7 @@
 //!     qs-sonyd                    run in the foreground until stopped
 //!     qs-sonyd once               dial, publish one document, exit
 //!     qs-sonyd --alerts           also ask the headset for its confirmations
+//!     qs-sonyd --record=DIR       also write every frame, both ways, as fixtures
 //!
 //! Speaks the MDR protocol to a connected Sony headset over RFCOMM, publishes
 //! its state as JSON, and takes commands on a private Unix socket. It is a
@@ -190,6 +191,16 @@ fn main() -> ExitCode {
     // has the long form.
     let session = Session::new(sony::DAEMON_VERSION.to_string(), Limits::default())
         .with_alerts(args.has("alerts"));
+    // Opened before the link exists, so a directory that cannot be made fails
+    // the start rather than the first frame. `capture::Recorder` says what
+    // the files are and why the directory is private.
+    let recorder = match args.value("record") {
+        None => None,
+        Some(dir) => match sony_xm5::capture::Recorder::new(std::path::Path::new(dir)) {
+            Ok(r) => Some(r),
+            Err(e) => return emit::failure(format!("cannot record into {dir}: {e}")),
+        },
+    };
     publish(&session);
 
     let stopper = bound.stopper();
@@ -208,7 +219,7 @@ fn main() -> ExitCode {
         .expect("the socket thread starts");
 
     // This thread is the engine.
-    let outcome = run_engine(session, began, mailbox, once);
+    let outcome = run_engine(session, began, mailbox, once, recorder);
 
     stopper.stop();
     let _ = server.join();
@@ -250,6 +261,7 @@ fn run_engine(
     began: Instant,
     mailbox: mpsc::Receiver<Msg>,
     once: bool,
+    mut recorder: Option<sony_xm5::capture::Recorder>,
 ) -> ExitCode {
     let mut writer: Option<link::Channel> = None;
     // Set when the ENGINE asked for the link to be shut, so the LinkDown the
@@ -278,11 +290,19 @@ fn run_engine(
         let effects = match mailbox.recv_timeout(wait) {
             Err(RecvTimeoutError::Disconnected) => break,
             Ok(Msg::LinkUp { peer, writer: channel }) => {
+                if let Some(r) = recorder.as_mut() {
+                    r.link_up();
+                }
                 writer = Some(channel);
                 hung_up = false;
                 session.step(Input::LinkUp { now: now(began), peer })
             }
-            Ok(Msg::Bytes(bytes)) => session.step(Input::Bytes { now: now(began), bytes: &bytes }),
+            Ok(Msg::Bytes(bytes)) => {
+                if let Some(r) = recorder.as_mut() {
+                    note_record(r.received(wall_ms(), &bytes));
+                }
+                session.step(Input::Bytes { now: now(began), bytes: &bytes })
+            }
             Ok(Msg::LinkDown(why)) => {
                 writer = None;
                 // A hang-up this engine asked for outranks whatever the
@@ -309,7 +329,13 @@ fn run_engine(
                     // right answer: a frame that could not be sent was not
                     // acknowledged, and there is one place that says so.
                     if let Some(link) = writer.as_ref() {
-                        if link.write_all(&bytes).is_err() {
+                        // Recorded only once it is on the wire: a frame that
+                        // never left is not part of the conversation.
+                        let written = link.write_all(&bytes);
+                        if let (Ok(()), Some(r)) = (&written, recorder.as_mut()) {
+                            note_record(r.sent(wall_ms(), &bytes));
+                        }
+                        if written.is_err() {
                             // The link is gone. Reported here rather than left
                             // to the reader, which may be blocked for as long
                             // as the headset stays silent.
@@ -358,6 +384,23 @@ fn run_engine(
         }
     }
     ExitCode::SUCCESS
+}
+
+/// Unix milliseconds, for a recorded frame's name. The engine's own clock
+/// (`now`) counts from the daemon's start, which would give every recording
+/// session the same names.
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// A frame that could not be recorded is said on stderr and the daemon goes
+/// on: a full disk must not cost the person their headset.
+fn note_record(result: std::io::Result<()>) {
+    if let Err(e) = result {
+        eprintln!("qs-sonyd: cannot record a frame: {e}");
+    }
 }
 
 fn publish(session: &Session) {

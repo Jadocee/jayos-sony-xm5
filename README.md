@@ -18,8 +18,9 @@ which kind of evidence stands behind it.
 |---|---|
 | `src/mdr/` | The protocol: framing (`frame`), what a payload means (`payload`), and the frames this port is willing to send (`encode`). Pure: no I/O. |
 | `src/sony/` | The daemon's contract: the state document (`state`), the command language (`command`), the engine (`session`), RFCOMM and SDP (`link`, `sdp`), the control socket (`serve`), and playback of a capture (`replay`). |
-| `src/bin/qs-sonyd.rs` | The daemon. Dials the connected headset, publishes `$XDG_STATE_HOME/sony-headphones/status.json`, answers commands on a private Unix socket. |
-| `src/bin/qs-sony.rs` | The client: `status`, `devices`, `send <command…>`, `available`, `replay <dir>`. |
+| `src/capture.rs` | Captures: a btsnoop trace read down to its MDR frames (`import`), the daemon's own link written as fixtures (`Recorder`), and which outstanding items a capture settles (`settle`). |
+| `src/bin/qs-sonyd.rs` | The daemon. Dials the connected headset, publishes `$XDG_STATE_HOME/sony-headphones/status.json`, answers commands on a private Unix socket. `--alerts` asks the headset for its confirmations; `--record=DIR` writes every frame, both ways. |
+| `src/bin/qs-sony.rs` | The client: `status`, `devices`, `send <command…>`, `available`, `replay <dir>`, and for a capture `decode`, `import` and `settle`. |
 | `src/support/` | Argument parsing, JSON on stdout and bounded subprocesses -- a copy of three jayos files; `src/support/mod.rs` says why a copy. |
 | `scripts/sony-daemon-process.sh` | Starts and stops the daemon, keeps its stderr, removes its document on stop. Knows nothing about whether it *should* run; that is the shell's setting. |
 | `contract/` | What JayOS tests its side against: a real state document, every key it carries, the command language, the model prefixes. Generated; see `contract/README.md`. |

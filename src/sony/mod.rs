@@ -232,6 +232,14 @@ fn c_name(name: &str) -> std::io::Result<CString> {
 /// here -- but it is a property of the call, not of this function, and a
 /// caller that moves the temporary elsewhere loses it.
 pub fn atomic_write(path: &std::path::Path, data: &str) -> std::io::Result<()> {
+    atomic_write_bytes(path, data.as_bytes())
+}
+
+/// [`atomic_write`] for bytes that are not text: a captured frame, which
+/// `capture::Recorder` writes the same way and for the same reason -- a
+/// fixture half-written when the daemon was killed would be a frame nobody
+/// sent.
+pub fn atomic_write_bytes(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     let Some(parent) = path.parent() else {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent"));
     };
@@ -276,7 +284,7 @@ pub fn atomic_write(path: &std::path::Path, data: &str) -> std::io::Result<()> {
             }
             Err(e) => return Err(e),
         };
-        f.write_all(data.as_bytes())?;
+        f.write_all(data)?;
         f.sync_all()
     };
 

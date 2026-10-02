@@ -13,3 +13,7 @@ pub mod sony;
 /// parsing, JSON on stdout, and running a subprocess with a deadline. The
 /// module docs say why it is a copy.
 pub mod support;
+
+/// Captures: imported from a Bluetooth trace, recorded by the daemon, and
+/// measured against what is still outstanding.
+pub mod capture;

@@ -5,6 +5,10 @@
 //!     qs-sony send <command...>   one command over the daemon's socket
 //!     qs-sony available           exit 0 if the daemon is reachable
 //!     qs-sony replay <dir> [--peer=NAME]   the document a capture produces
+//!     qs-sony decode <file|dir>   every frame: what it is, what it says, on what grounds
+//!     qs-sony import <btsnoop> --out=DIR [--channel=N] [--exclude=CMD,...]
+//!                                 a Bluetooth trace's MDR frames, as fixtures
+//!     qs-sony settle <dir>        which outstanding items a capture settles
 //!
 //! A thin wrapper over the headphone daemon: something that speaks the Sony |
 //! Sound Connect protocol, publishes JSON state and accepts commands on a
@@ -930,6 +934,9 @@ fn main() -> ExitCode {
         "devices" => devices(),
         "available" => available(),
         "replay" => replay(&args),
+        "decode" => decode(&args),
+        "import" => import(&args),
+        "settle" => settle(&args),
         "send" => {
             // Taken raw rather than from `Args`, because everything after the
             // verb belongs to the daemon's protocol and not to ours: a flag it
@@ -955,7 +962,7 @@ fn main() -> ExitCode {
         other => emit::unknown_command(
             "qs-sony",
             other,
-            &["status", "devices", "send", "available", "replay"],
+            &["status", "devices", "send", "available", "replay", "decode", "import", "settle"],
         ),
     }
 }
@@ -991,6 +998,150 @@ fn replay(args: &Args) -> ExitCode {
     let peer = args.value("peer").unwrap_or("WF-1000XM5");
     print!("{}", sony_xm5::sony::replay::document(&frames, peer, sony_xm5::sony::DAEMON_VERSION));
     ExitCode::SUCCESS
+}
+
+/// Every frame in a fixture file or a capture directory, decoded.
+///
+/// One JSON object per frame, in name order: the file, which way it went, the
+/// dispatch key, what the decoder made of it, and the grounds it stands on
+/// (`mdr::payload::Grounds`) -- `null` grounds for a frame nothing decodes.
+/// The reading is the decoder's own debug form: this is for a person reading a
+/// new capture, and a second JSON shape for every reading would be a second
+/// description of the decoder to keep in step with it.
+fn decode(args: &Args) -> ExitCode {
+    use sony_xm5::mdr::{frame, payload};
+    if let Some(code) = args.reject_unknown(&[]) {
+        return code;
+    }
+    let Some(target) = args.positional(0) else {
+        return emit::failure("decode needs a fixture file or a capture directory");
+    };
+    let target = Path::new(target);
+    let files: Vec<PathBuf> = if target.is_dir() {
+        let mut names: Vec<PathBuf> = match std::fs::read_dir(target) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "bin"))
+                .collect(),
+            Err(e) => return emit::failure(format!("cannot read {}: {e}", target.display())),
+        };
+        names.sort();
+        names
+    } else {
+        vec![target.to_path_buf()]
+    };
+    if files.is_empty() {
+        return emit::failure(format!("{} holds no .bin frame", target.display()));
+    }
+    let mut out = Vec::new();
+    for path in files {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let direction = if name.contains("-tx.") { "tx" } else if name.contains("-rx.") { "rx" } else { "unknown" };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => return emit::failure(format!("cannot read {}: {e}", path.display())),
+        };
+        match frame::unpack(&bytes) {
+            Ok(f) => out.push(json!({
+                "file": name,
+                "direction": direction,
+                "data_type": sony_xm5::capture::data_type_name(f.data_type),
+                "seq": f.seq,
+                "command": f.payload.first(),
+                "command_name": sony_xm5::capture::command_name(f.data_type, &f.payload),
+                "kind": f.payload.get(1),
+                "len": f.payload.len(),
+                "reading": format!("{:?}", payload::decode(f.data_type, &f.payload)),
+                "grounds": payload::grounds(f.data_type, &f.payload).map(|g| g.as_str()),
+            })),
+            Err(e) => out.push(json!({ "file": name, "direction": direction, "error": format!("{e:?}") })),
+        }
+    }
+    emit::json(&out)
+}
+
+/// A btsnoop trace's MDR frames, written as fixtures named as the corpus is.
+fn import(args: &Args) -> ExitCode {
+    if let Some(code) = args.reject_unknown(&["out", "channel", "exclude"]) {
+        return code;
+    }
+    let (Some(file), Some(out)) = (args.positional(0), args.value("out")) else {
+        return emit::failure("import needs a btsnoop file and --out=DIR");
+    };
+    let channel = match args.value("channel").map(str::parse::<u8>) {
+        None => None,
+        Some(Ok(c)) if (1..=30).contains(&c) => Some(c),
+        Some(_) => return emit::failure("--channel is an RFCOMM server channel, 1 to 30"),
+    };
+    let exclude: Vec<String> =
+        args.value("exclude").map(|e| e.split(',').map(str::to_string).collect()).unwrap_or_default();
+    let bytes = match std::fs::read(file) {
+        Ok(b) => b,
+        Err(e) => return emit::failure(format!("cannot read {file}: {e}")),
+    };
+    let imported = match sony_xm5::capture::import(&bytes, channel) {
+        Ok(i) => i,
+        Err(e) => return emit::failure(format!("{file}: {e}")),
+    };
+    match sony_xm5::capture::write_fixtures(&imported, Path::new(out), &exclude) {
+        Ok(names) => emit::json(&json!({
+            "ok": true,
+            "channel": imported.dlci >> 1,
+            "frames": imported.frames.len(),
+            "written": names.len(),
+            "out": out,
+        })),
+        Err(e) => emit::failure(format!("cannot write {out}: {e}")),
+    }
+}
+
+/// Which outstanding items a capture directory settles.
+///
+/// Exit 0: every item frames can settle is settled. 1: some are still open --
+/// a definite answer, and the ordinary one. 2: the directory holds no frame,
+/// so nothing was examined, which must not read as either.
+fn settle(args: &Args) -> ExitCode {
+    use sony_xm5::capture::{self, Verdict};
+    if let Some(code) = args.reject_unknown(&[]) {
+        return code;
+    }
+    let Some(dir) = args.positional(0) else {
+        return emit::failure("settle needs a capture directory");
+    };
+    let capture = match capture::load(Path::new(dir)) {
+        Ok(c) => c,
+        Err(e) => return emit::failure(format!("cannot read {dir}: {e}")),
+    };
+    if capture.frames.is_empty() {
+        eprintln!("error: {dir} holds no frame (*-rx.*.bin, *-tx.*.bin)");
+        let _ = emit::json(&json!({ "ok": false, "error": format!("{dir} holds no frame") }));
+        return ExitCode::from(2);
+    }
+    let verdicts = capture::settle(&capture);
+    let open = verdicts.iter().any(|(_, v)| *v == Verdict::Open);
+    let items: Vec<Value> = verdicts
+        .iter()
+        .map(|(item, verdict)| {
+            let (state, detail) = match verdict {
+                Verdict::Settled(what) => ("settled", what.clone()),
+                Verdict::Open => ("open", String::new()),
+                Verdict::NotFromFrames(how) => ("not-from-frames", (*how).to_string()),
+            };
+            json!({ "item": item.number, "title": item.title, "state": state, "detail": detail })
+        })
+        .collect();
+    let _ = emit::json(&json!({
+        "model": capture.model,
+        "target": capture::TARGET_MODEL,
+        "frames": capture.frames.len(),
+        "items": items,
+    }));
+    if open {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 #[cfg(test)]

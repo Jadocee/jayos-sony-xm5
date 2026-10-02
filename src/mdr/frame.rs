@@ -310,6 +310,17 @@ impl Scanner {
     /// consumed, so the caller can report it and carry on rather than seeing it
     /// again on every call.
     pub fn next_frame(&mut self) -> Option<Result<Frame, FrameError>> {
+        self.next_raw().map(|span| unpack(&span))
+    }
+
+    /// The next frame-shaped span, exactly as it was on the wire -- escapes,
+    /// checksum, markers and all -- whether or not it unpacks.
+    ///
+    /// What a capture writes: a fixture is the wire bytes, not a re-packed
+    /// frame, because a re-pack would hide an escaping or checksum difference
+    /// the decoder ought to have seen. [`Scanner::next_frame`] is this and an
+    /// [`unpack`], so the two cannot disagree about where a frame ends.
+    pub fn next_raw(&mut self) -> Option<Vec<u8>> {
         let Some(start) = self.buf.iter().position(|&b| b == START) else {
             // Not one byte here can begin a frame, so none of it is worth
             // keeping. Without this a peer that sends anything except a start
@@ -339,7 +350,6 @@ impl Scanner {
 
         // Consumed whether or not it decodes, so a span that will never be a
         // frame is reported once rather than returned again on every call.
-        let span: Vec<u8> = self.buf.drain(..=end).collect();
-        Some(unpack(&span))
+        Some(self.buf.drain(..=end).collect())
     }
 }
