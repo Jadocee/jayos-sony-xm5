@@ -25,6 +25,8 @@ which kind of evidence stands behind it.
 | `scripts/sony-daemon-process.sh` | Starts and stops the daemon, keeps its stderr, removes its document on stop. Knows nothing about whether it *should* run; that is the shell's setting. |
 | `contract/` | What JayOS tests its side against: a real state document, every key it carries, the command language, the model prefixes. Generated; see `contract/README.md`. |
 | `packaging/arch/PKGBUILD` | Builds and installs this checkout. |
+| `docs/` | `PROTOCOL.md`, the map; `EVIDENCE.md`, what each claim stands on; `OUTSTANDING.md`, what a WH-1000XM5 capture would still settle; `CAPTURE.md`, how to make one. |
+| `tools/acceptance.sh` | That capture session, scripted. `--dry-run` says every step and runs none. |
 
 ## Installing
 

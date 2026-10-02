@@ -42,6 +42,7 @@ const PROSE: &[&str] = &[
     "src/mdr/encode.rs",
     "tests/sony_contract.rs",
     "tests/fixtures/mdr/PROVENANCE.md",
+    "docs/PROTOCOL.md",
     "docs/OUTSTANDING.md",
     "docs/EVIDENCE.md",
     "docs/CAPTURE.md",
