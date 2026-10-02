@@ -36,14 +36,15 @@
 //! WHAT IS DECODED, AND WHAT IS NOT
 //!
 //! Each decoder says which grounds it stands on, and [`grounds`] says the same
-//! to a program. Four kinds:
+//! to a program. Five kinds:
 //!
 //! CAPTURED means a frame a real WF-1000XM5 sent was decoded byte by byte and
 //! the values came out sensible: the two threshold battery forms (0x09, 0x0A),
 //! the NC/ASM variant at 0x17, the model name and firmware version, the
 //! equaliser preset with its band steps, the music volume, the A2DP codec,
 //! both support-function tables, both halves of DSEE, both halves of
-//! Speak-to-Chat, the named general settings and the paired-device list.
+//! Speak-to-Chat, the named general settings, the paired-device list and the
+//! play status.
 //! [`CAPTURED`] lists the keys, held to the corpus by a test.
 //!
 //! REFERENCE CLIENT means the meaning is libmdr's: it decodes the key this
@@ -51,7 +52,10 @@
 //! project reports a real headset sending it. HEADER ONLY means the layout is
 //! transcribed and nothing has been seen sending it: the four plain battery
 //! forms, which are the ones an over-ear reports and which no capture in this
-//! corpus covers, and the ambient level's capability reply.
+//! corpus covers, and the ambient level's capability reply. AGAINST HEADER
+//! means the layout is the header's and the value is one its own `CODEGEN
+//! EnumRange` excludes: a connection mode reading anything but
+//! CONNECTION_QUALITY_PRIOR.
 //!
 //! Everything else is [`Reading::Unhandled`]. That is a panel showing "unknown"
 //! rather than a plausible-looking number, and it is recoverable by capturing
