@@ -321,7 +321,8 @@ fn the_corpus_settles_nothing_because_it_is_the_wrong_headset() {
 fn a_capture_of_the_target_headset_settles_what_it_holds() {
     // Synthetic, written in the corpus's scheme: a WH-1000XM5 that names
     // itself, answers its single battery and NC/ASM, takes a general-setting
-    // write and reads it back, and asks and is answered an alert.
+    // write and reads it back, asks and is answered an alert, and -- after a
+    // reconnect, its protocol-info reply again -- still has the setting.
     let dir = std::env::temp_dir().join(format!("sony-capture-settle-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let mut recorder = capture::Recorder::new(&dir).expect("a recorder");
@@ -336,11 +337,24 @@ fn a_capture_of_the_target_headset_settles_what_it_holds() {
     rx(&mut recorder, &[0xD9, 0xD2, 0x00, 0x01]);
     rx(&mut recorder, &[0x99, 0x00, 0x07, 0x01]);
     tx(&mut recorder, &[0x98, 0x00, 0x07, 0x01]);
+    rx(&mut recorder, &[0x01, 0x00, 0x00, 0x00, 0x00, 0x02]);
+    rx(&mut recorder, &[0xD7, 0xD2, 0x00, 0x01]);
     let capture = capture::load(&dir).expect("it loads");
     assert_eq!(capture.model.as_deref(), Some("WH-1000XM5"));
     let verdicts: Vec<(u8, Verdict)> = capture::settle(&capture).into_iter().map(|(i, v)| (i.number, v)).collect();
     let settled: Vec<u8> = verdicts.iter().filter(|(_, v)| matches!(v, Verdict::Settled(_))).map(|(n, _)| *n).collect();
     assert_eq!(settled, vec![1, 3, 6, 14], "{verdicts:?}");
+    // Without the reconnect, the alert alone settles nothing: item 14 is
+    // about what persists.
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut recorder = capture::Recorder::new(&dir).expect("a recorder");
+    rx(&mut recorder, &model);
+    tx(&mut recorder, &[0xD8, 0xD2, 0x00, 0x01]);
+    rx(&mut recorder, &[0x99, 0x00, 0x07, 0x01]);
+    tx(&mut recorder, &[0x98, 0x00, 0x07, 0x01]);
+    rx(&mut recorder, &[0xD7, 0xD2, 0x00, 0x01]);
+    let capture = capture::load(&dir).expect("it loads");
+    assert!(capture::settle(&capture).iter().all(|(i, v)| i.number != 14 || *v == Verdict::Open));
     // A write read back in the OTHER polarity does not settle item 6.
     let _ = std::fs::remove_dir_all(&dir);
     let mut recorder = capture::Recorder::new(&dir).expect("a recorder");

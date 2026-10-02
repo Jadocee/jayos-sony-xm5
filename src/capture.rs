@@ -833,10 +833,28 @@ pub const ITEMS: &[Item] = &[
     Item { number: 13, title: "the page drawn against a live document", check: |_| {
         Verdict::NotFromFrames("a screenshot of the Headphones page, docs/CAPTURE.md")
     } },
-    Item { number: 14, title: "an alert asked and answered", check: |c| {
-        let Some(asked) = decodes(c, |r| matches!(r, payload::Reading::Alert { .. })) else { return Verdict::Open };
-        let answered = c.frames.iter().any(|(d, _, p)| *d == Direction::Tx && p.first() == Some(&0x98));
-        if answered { Verdict::Settled(format!("asked {}", hex(&asked))) } else { Verdict::Open }
+    // A write, then a NEW LINK -- the headset's CONNECT_RET_PROTOCOL_INFO
+    // again -- then the same slot read back with the same value. The alert a
+    // multipoint write raises with `--alerts` on is reported beside it, not
+    // required: it is how the write is confirmed, not what persists.
+    Item { number: 14, title: "a general-setting write that survives a reconnect", check: |c| {
+        let frames = &c.frames;
+        let Some(write) = frames.iter().position(|(d, _, p)| *d == Direction::Tx && p.first() == Some(&0xD8)) else {
+            return Verdict::Open;
+        };
+        let sent = frames[write].2.as_slice();
+        let Some(relink) = frames[write..].iter().position(|(d, t, p)| {
+            *d == Direction::Rx && *t == DataType::DataMdr && p.first() == Some(&0x01)
+        }) else {
+            return Verdict::Open;
+        };
+        let back = frames[write + relink..].iter().find(|(d, _, p)| {
+            *d == Direction::Rx && p.first() == Some(&0xD7) && p.get(1) == sent.get(1)
+        });
+        let Some((_, _, back)) = back.filter(|(_, _, p)| p.get(3) == sent.get(3)) else { return Verdict::Open };
+        let alert = decodes(c, |r| matches!(r, payload::Reading::Alert { .. }))
+            .map_or_else(|| "no alert".to_string(), |a| format!("alert {}", hex(&a)));
+        Verdict::Settled(format!("{} then, after a reconnect, {}; {alert}", hex(sent), hex(back)))
     } },
 ];
 
