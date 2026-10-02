@@ -268,6 +268,9 @@ pub enum Refusal {
     /// The headset has the feature and said, in its own last reply, that it
     /// will not take it now.
     Unavailable { verb: &'static str, said: &'static str },
+    /// The headset named more than one of its settings this way, so the name
+    /// does not say which slot to write.
+    Collision { verb: &'static str, key: String, slots: Vec<u8> },
     /// A verb with no device message behind it at all.
     NoEncoder { verb: &'static str, why: &'static str },
 }
@@ -282,7 +285,8 @@ impl Refusal {
             | Refusal::UnknownVariant { .. }
             | Refusal::OutOfRange { .. }
             | Refusal::OutOfDeviceRange { .. }
-            | Refusal::Unavailable { .. } => Side::Device,
+            | Refusal::Unavailable { .. }
+            | Refusal::Collision { .. } => Side::Device,
             // These three are this port's gaps, not the headset's.
             Refusal::Ambiguous { .. }
             | Refusal::Undocumented { .. }
@@ -330,6 +334,14 @@ impl Refusal {
             }
             Refusal::Unavailable { verb, said } => {
                 format!("{verb}: this headset says it is unavailable now -- {said}")
+            }
+            Refusal::Collision { verb, key, slots } => {
+                let slots: Vec<String> = slots.iter().map(|s| format!("0x{s:02x}")).collect();
+                format!(
+                    "{verb}: this headset names more than one setting {key} (slots {}); \
+                     name it in full to choose",
+                    slots.join(", ")
+                )
             }
         }
     }
@@ -887,9 +899,30 @@ fn encode_eq_preset(facts: &Facts, name: &str) -> Result<Outgoing, Refusal> {
 /// to a reader even though this verb cannot express it.
 fn encode_general_setting(facts: &Facts, key: &str, on: bool) -> Result<Outgoing, Refusal> {
     let verb = "general";
-    let Some(slot) =
-        facts.general_settings().find(|(_, info, _)| info.key() == key).map(|(slot, _, _)| slot)
-    else {
+    // EVERY MATCH, NOT THE FIRST. This was `.find`, which wrote whichever slot
+    // came first in slot order when two settings answered to one key -- and
+    // they can: `key()` trims `_SETTING`, so `MULTIPOINT_SETTING` and a
+    // `MULTIPOINT` beside it are both `multipoint`, and nothing stops a
+    // headset naming two slots identically. Writing a slot the person did not
+    // mean is a setting changed behind their back. Plan 23, item 12.
+    //
+    // A slot answers to its trimmed key AND to its full name lowercased, so
+    // `general multipoint_setting on` reaches the slot the headset called that
+    // when the trimmed form collides. The two are UNIONED, not tried in turn:
+    // the plan said full name first, but a page sends the document's `key`,
+    // and with the pair above a full-name-first rule would answer
+    // `multipoint` with the second slot when the row the person pressed was
+    // the first -- both rows publish `key: "multipoint"`. Any name more than
+    // one slot answers to is refused, listing the slots.
+    let slots: Vec<u8> = facts
+        .general_settings()
+        .filter(|(_, info, _)| info.key() == key || info.name.to_ascii_lowercase() == key)
+        .map(|(slot, _, _)| slot)
+        .collect();
+    if slots.len() > 1 {
+        return Err(Refusal::Collision { verb, key: key.to_string(), slots });
+    }
+    let Some(slot) = slots.first().copied() else {
         // NOT `NotAdvertised`, which would say the headset lacks the FEATURE.
         // It may have general settings and simply not this one -- a WF-1000XM5
         // has no touch panel -- and it may not have answered yet. `NotRead`

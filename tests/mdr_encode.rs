@@ -1167,3 +1167,59 @@ fn table_two_is_asked_what_its_own_functions_name() {
         assert_eq!(g.data_type, DataType::DataMdrNo2, "{g:?}");
     }
 }
+
+/// A GENERAL_SETTING_RET_CAPABILITY for `slot` naming `name`, in the corpus's
+/// shape: BOOLEAN_TYPE, a display byte, then two length-prefixed strings.
+fn gs_capability(slot: u8, name: &str) -> Vec<u8> {
+    let summary = format!("{name}_SUMMARY");
+    let mut p = vec![0xD1, slot, 0x00, 0x01, name.len() as u8];
+    p.extend_from_slice(name.as_bytes());
+    p.push(summary.len() as u8);
+    p.extend_from_slice(summary.as_bytes());
+    p
+}
+
+#[test]
+fn a_setting_name_two_slots_answer_to_is_refused_rather_than_guessed() {
+    // PLAN 23, ITEM 12. `key()` trims `_SETTING`, so two slots can answer to
+    // one key -- and a headset can name two slots identically outright. The
+    // write used to go to whichever came first in slot order.
+    let facts_with = |names: &[(u8, &str)]| -> Facts {
+        let mut facts = only_table_one(&[0xD1, 0xD2, 0xD3]);
+        for (slot, name) in names {
+            facts.observe(DataType::DataMdr, &gs_capability(*slot, name));
+        }
+        facts
+    };
+    let write = |facts: &Facts, key: &str| encode::encode(facts, &Verb::GeneralSetting { key: key.into(), on: true });
+
+    // Two slots trimming to `multipoint`: the trimmed key is refused by
+    // name, with both slots listed, on the device's side.
+    let facts = facts_with(&[(0xD1, "MULTIPOINT_SETTING"), (0xD2, "MULTIPOINT")]);
+    match write(&facts, "multipoint") {
+        Err(Refusal::Collision { key, slots, .. }) => {
+            assert_eq!(key, "multipoint");
+            assert_eq!(slots, vec![0xD1, 0xD2]);
+        }
+        other => panic!("a colliding key produced {other:?}"),
+    }
+    let refusal = write(&facts, "multipoint").expect_err("refused");
+    assert_eq!(refusal.clone().side(), Side::Device);
+    assert!(refusal.message().contains("0xd1, 0xd2"), "{}", refusal.message());
+
+    // The full name chooses where it is unique: `multipoint_setting` is the
+    // first slot's full name and nobody's key.
+    assert_eq!(write(&facts, "multipoint_setting").expect("a frame").payload[1], 0xD1);
+
+    // Two slots named identically collide on the full name too.
+    let twins = facts_with(&[(0xD1, "TOUCH_PANEL_SETTING"), (0xD3, "TOUCH_PANEL_SETTING")]);
+    for key in ["touch_panel", "touch_panel_setting"] {
+        assert!(matches!(write(&twins, key), Err(Refusal::Collision { .. })), "{key}");
+    }
+
+    // And no collision, no change: one slot per name is written as before.
+    let plain = facts_with(&[(0xD1, "SIDETONE_SETTING"), (0xD2, "MULTIPOINT_SETTING")]);
+    assert_eq!(write(&plain, "multipoint").expect("a frame").payload[1], 0xD2);
+    assert_eq!(write(&plain, "sidetone").expect("a frame").payload[1], 0xD1);
+    assert!(matches!(write(&plain, "touch_panel"), Err(Refusal::NotRead { .. })));
+}
