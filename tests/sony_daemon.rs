@@ -282,6 +282,22 @@ fn a_one_shot_run_ends_by_itself() {
 }
 
 #[test]
+fn a_one_shot_run_says_whether_it_asks_for_alerts() {
+    // PLAN 23, ITEM 14. `--alerts` reaching the session has no other
+    // witness without a headset: the enable it causes is sent only to one
+    // that advertises FIXED_MESSAGE. The log line is read back from the
+    // session, so a flag that stopped reaching it stops the line too.
+    const LINE: &str = "--alerts: the headset will be asked for its confirmations";
+    let home = Home::new("alerts");
+    let with = home.command("once").arg("--alerts").output().expect("it runs");
+    assert!(with.status.success(), "{with:?}");
+    assert!(String::from_utf8_lossy(&with.stderr).contains(LINE), "{}", String::from_utf8_lossy(&with.stderr));
+    let without = home.command("once").output().expect("it runs");
+    assert!(without.status.success(), "{without:?}");
+    assert!(!String::from_utf8_lossy(&without.stderr).contains(LINE), "alerts were asked for without --alerts");
+}
+
+#[test]
 fn a_verb_the_daemon_does_not_have_is_refused_before_anything_starts() {
     let home = Home::new("verbs");
     let out = home.command("dance").output().expect("it runs");
@@ -290,6 +306,32 @@ fn a_verb_the_daemon_does_not_have_is_refused_before_anything_starts() {
     assert!(said.contains("dance"), "the refusal does not name the verb: {said}");
     // Nothing was started, so nothing was left behind.
     assert!(!home.socket().exists(), "a refused verb still bound the socket");
+}
+
+#[test]
+fn a_flag_the_daemon_does_not_take_is_refused_before_anything_starts() {
+    // PLAN 23. Both of the daemon's flags shape a capture session, and each
+    // of these used to run one without it, exiting 0: a typo ran with alerts
+    // off, a bare --record recorded nothing, and --alerts=no turned alerts
+    // ON. Refused with 2 -- nothing was attempted -- and nothing bound,
+    // published or created.
+    let home = Home::new("flags");
+    let record = home.base.join("record");
+    for (flag, says) in [
+        ("--alertz", "--alertz"),
+        ("--alert", "--alert"),
+        ("--record", "--record needs a directory"),
+        ("--record=", "--record needs a directory"),
+        ("--alerts=no", "--alerts takes no value"),
+    ] {
+        let out = home.command("once").arg(flag).output().expect("it runs");
+        let said = String::from_utf8_lossy(&out.stdout) + String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{flag}: {said}");
+        assert!(said.contains(says), "{flag}: the refusal does not say why: {said}");
+        assert!(!home.socket().exists(), "{flag} still bound the socket");
+        assert!(!home.state_file().exists(), "{flag} still published a document");
+        assert!(!record.exists(), "{flag} made a recording directory");
+    }
 }
 
 #[test]

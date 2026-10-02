@@ -21,15 +21,19 @@
 //!
 //! NOTHING IS REDACTED. A frame is written whole or not at all: `--exclude`
 //! drops every frame of a named command, and the counter still counts it, so
-//! the gap shows. A capture with a byte changed is not a capture.
+//! the gap shows. A frame-shaped span that does not unpack is counted the same
+//! way, by the importer and the recorder alike. A capture with a byte changed
+//! is not a capture.
 //!
 //! WHAT IS TESTED AND WHAT IS NOT. `tests/capture.rs` builds btsnoop files from
 //! the corpus's own frames and requires every frame back, byte for byte and
-//! named as the corpus names it. That round trip is CIRCULAR -- the input was
-//! built by code that shares this module's reading of the formats -- and is
-//! evidence that the walk is consistent, not that it matches a real trace.
-//! The layouts are cited where they are read; none of this has read a trace a
-//! real adapter wrote.
+//! named as the corpus names it, and builds small traces for the shapes the
+//! round trip does not have -- a reconnect, a late start, two handles, a
+//! second controller, a channel at the RFCOMM channel's number that is not
+//! it. All of it is CIRCULAR -- the input was built by code that shares this
+//! module's reading of the formats -- and is evidence that the walk is
+//! consistent, not that it matches a real trace. The layouts are cited where
+//! they are read; none of this has read a trace a real adapter wrote.
 
 use crate::mdr::{frame, payload, DataType};
 use std::io;
@@ -292,7 +296,9 @@ const T2_COMMANDS: &[(u8, &str)] = &[
     (0xFF, "UNKNOWN"),
 ];
 
-/// `MDRDataType` (`Protocol.hpp:38`) by name.
+/// [`DataType`]'s variants by their `MDRDataType` names (`Protocol.hpp:38`).
+/// A type `DataType` does not model -- `LARGE_DATA_COMMON` (0x2D) among them
+/// -- is `UNKNOWN`, with its byte beside the name as every type's is.
 pub fn data_type_name(data_type: DataType) -> &'static str {
     match data_type {
         DataType::Data => "DATA",
@@ -333,8 +339,13 @@ pub fn command_name(data_type: DataType, payload: &[u8]) -> &'static str {
 /// The corpus's file name for one wire frame:
 /// `mdr-packet-<ms>-<counter>-<rx|tx>.type-<NAME>-<hex>.seq-<hex>.cmd-<NAME>-<hex>.bin`.
 ///
-/// `None` for bytes that are not a frame. The counter is six digits, so the
-/// names sort in capture order, which is what `sony::replay` relies on.
+/// `None` for bytes that are not a frame.
+///
+/// THE COUNTER IS THE ORDER, NOT THE NAME. The time comes first in the name
+/// and the counter only breaks ties, and the recorder's time is the wall
+/// clock, which can step backwards mid-recording -- so a plain sort of the
+/// names can put a frame before one it followed. Readers sort with
+/// [`capture_order`] instead, on the counter.
 pub fn fixture_name(ms: u64, counter: u32, direction: Direction, wire: &[u8]) -> Option<String> {
     let f = frame::unpack(wire).ok()?;
     let command = f.payload.first().copied().unwrap_or(0);
@@ -346,6 +357,18 @@ pub fn fixture_name(ms: u64, counter: u32, direction: Direction, wire: &[u8]) ->
         f.seq,
         command_name(f.data_type, &f.payload),
     ))
+}
+
+/// The counter in a fixture name, `mdr-packet-<ms>-<counter>-...`.
+fn counter_of(name: &str) -> Option<u32> {
+    name.strip_prefix("mdr-packet-")?.split('-').nth(1)?.parse().ok()
+}
+
+/// Fixture names in the order their frames crossed the link: by counter,
+/// then by name for anything without one. See [`fixture_name`] for why not
+/// by name alone.
+pub fn capture_order(names: &mut [String]) {
+    names.sort_by(|a, b| (counter_of(a), a).cmp(&(counter_of(b), b)));
 }
 
 // ── btsnoop ─────────────────────────────────────────────────────────────────
@@ -377,8 +400,11 @@ impl std::fmt::Display for ImportError {
 }
 
 /// Microseconds from 0 AD to the Unix epoch: btsnoop's timestamp origin (the
-/// btsnoop format note, "Timestamp"; BlueZ `src/shared/btsnoop.c` uses the
-/// same constant).
+/// btsnoop format note, "Timestamp"). BlueZ reaches the same origin by
+/// another route -- `btsnoop_write` in `src/shared/btsnoop.c` counts from
+/// 2000-01-01 (`tv_sec - 946684800`) and adds `0x00E03AB44A676000`, the
+/// microseconds from 0 AD to 2000 -- and the two differ by exactly
+/// 946684800 seconds, so a timestamp it wrote reads back here unchanged.
 pub const BTSNOOP_EPOCH_DELTA_US: u64 = 0x00dc_ddb3_0f2f_8000;
 
 /// One ACL packet, which way it went, and when, in Unix milliseconds.
@@ -465,7 +491,10 @@ struct Pdu {
 /// fragment is: 0b01 continues the PDU in progress, anything else starts one.
 /// The L2CAP basic header's length says when it is whole. A continuation with
 /// nothing in progress, or a start while one is unfinished, is a lost
-/// fragment, and the partial PDU is dropped rather than spliced to the next.
+/// fragment, and the partial PDU is dropped rather than spliced to the next --
+/// on EVERY start, including one that is whole in a single fragment: kept,
+/// the stale partial took the next continuation and came out after the PDU
+/// that should have followed it.
 fn reassemble(packets: &[Acl]) -> Vec<Pdu> {
     use std::collections::HashMap;
     let mut open: HashMap<(u16, bool), (u64, Vec<u8>)> = HashMap::new();
@@ -480,6 +509,7 @@ fn reassemble(packets: &[Acl]) -> Vec<Pdu> {
             buf.extend_from_slice(data);
             open.remove(&key).map(|(_, b)| b).unwrap_or_default()
         } else {
+            open.remove(&key);
             data.to_vec()
         };
         let Some(want) = le16(&buf, 0) else {
@@ -497,41 +527,85 @@ fn reassemble(packets: &[Acl]) -> Vec<Pdu> {
     out
 }
 
-/// The (handle, direction, CID) triples that carry PSM 3, from the L2CAP
-/// signalling channel (CID 0x0001).
-///
-/// A Connection Request (0x02) for PSM 3 names its sender's channel as its
-/// source CID, and data TO that sender carries it -- so it marks the opposite
-/// direction. A successful Connection Response (0x03) names its sender's
-/// channel as its destination CID, which marks the opposite direction too.
-/// (Bluetooth Core, Vol 3 Part A, 4.2 and 4.3.)
-fn rfcomm_channels(pdus: &[Pdu]) -> Vec<(u16, Direction, u16)> {
-    let flip = |d: Direction| if d == Direction::Rx { Direction::Tx } else { Direction::Rx };
-    let mut asked: Vec<(u16, Direction, u16)> = Vec::new();
+/// One L2CAP signalling PDU's commands, as (code, body).
+fn signals(p: &Pdu) -> Vec<(u8, &[u8])> {
     let mut out = Vec::new();
+    let mut at = 0;
+    while let (Some(&code), Some(len)) = (p.payload.get(at), le16(&p.payload, at + 2)) {
+        out.push((code, p.payload.get(at + 4..at + 4 + usize::from(len)).unwrap_or(&[])));
+        at += 4 + usize::from(len);
+    }
+    out
+}
+
+fn flip(d: Direction) -> Direction {
+    if d == Direction::Rx {
+        Direction::Tx
+    } else {
+        Direction::Rx
+    }
+}
+
+/// What the L2CAP signalling channel (CID 0x0001) says about the dynamic
+/// channels, as (handle, direction, CID) triples: the CID the data in that
+/// direction on that handle is addressed to.
+///
+/// A Connection Request (0x02) names its sender's channel as its source CID,
+/// and data TO that sender carries it -- so it marks the opposite direction.
+/// A Connection Response (0x03) names its sender's channel as its destination
+/// CID, which marks the opposite direction too. (Bluetooth Core, Vol 3 Part
+/// A, 4.2 and 4.3.)
+#[derive(Debug, Default)]
+struct Signalled {
+    /// The channels a PSM 3 request asked for and a success answered.
+    rfcomm: Vec<(u16, Direction, u16)>,
+    /// Every channel any request or response named, whatever its PSM -- the
+    /// ones that are NOT a guess. See [`import`] for what that decides.
+    named: Vec<(u16, Direction, u16)>,
+}
+
+fn signalled(pdus: &[Pdu]) -> Signalled {
+    let mut asked: Vec<(u16, Direction, u16)> = Vec::new();
+    let mut out = Signalled::default();
     for p in pdus.iter().filter(|p| p.cid == 0x0001) {
-        let mut at = 0;
-        while let (Some(&code), Some(len)) = (p.payload.get(at), le16(&p.payload, at + 2)) {
-            let body = p.payload.get(at + 4..at + 4 + usize::from(len)).unwrap_or(&[]);
+        for (code, body) in signals(p) {
             match code {
-                0x02 if le16(body, 0) == Some(0x0003) => {
-                    if let Some(source) = le16(body, 2) {
-                        out.push((p.handle, flip(p.direction), source));
+                0x02 => {
+                    let Some(source) = le16(body, 2) else { continue };
+                    out.named.push((p.handle, flip(p.direction), source));
+                    if le16(body, 0) == Some(0x0003) {
+                        out.rfcomm.push((p.handle, flip(p.direction), source));
                         asked.push((p.handle, p.direction, source));
                     }
                 }
-                0x03 if le16(body, 4) == Some(0x0000) => {
-                    let (Some(dest), Some(source)) = (le16(body, 0), le16(body, 2)) else { break };
-                    if asked.iter().any(|(h, d, s)| *h == p.handle && *d == flip(p.direction) && *s == source) {
-                        out.push((p.handle, flip(p.direction), dest));
+                0x03 => {
+                    let (Some(dest), Some(source)) = (le16(body, 0), le16(body, 2)) else { continue };
+                    out.named.push((p.handle, flip(p.direction), dest));
+                    let rfcomm =
+                        asked.iter().any(|(h, d, s)| *h == p.handle && *d == flip(p.direction) && *s == source);
+                    if rfcomm && le16(body, 4) == Some(0x0000) {
+                        out.rfcomm.push((p.handle, flip(p.direction), dest));
                     }
                 }
                 _ => {}
             }
-            at += 4 + usize::from(len);
         }
     }
     out
+}
+
+/// Whether a signalling PDU asks for a new PSM 3 channel: a new RFCOMM
+/// session on that handle starting.
+fn asks_rfcomm(p: &Pdu) -> bool {
+    p.cid == 0x0001 && signals(p).iter().any(|(code, body)| *code == 0x02 && le16(body, 0) == Some(0x0003))
+}
+
+/// The DLCI an RFCOMM SABM opens, or `None` for any other frame. TS 07.10:
+/// SABM is control 0x2F, 0x3F with the P/F bit. On DLCI 0 it starts the
+/// multiplexer -- a new RFCOMM session; on any other, that one data link.
+fn sabm(pdu: &[u8]) -> Option<u8> {
+    let address = *pdu.first()?;
+    (*pdu.get(1)? & !0x10 == 0x2F).then_some(address >> 2)
 }
 
 /// One RFCOMM UIH frame's DLCI and information field, or `None` for any other
@@ -568,75 +642,153 @@ pub struct Imported {
     /// The DLCI the frames were read from. The RFCOMM server channel is this
     /// shifted right by one.
     pub dlci: u8,
-    /// Every MDR frame in both directions, in the order they crossed the link,
-    /// each with the time of the record that completed it.
+    /// Every frame-shaped span on that DLCI in both directions, in the order
+    /// they crossed the link, each with the time of the record that completed
+    /// it -- INCLUDING a span that does not unpack. A span the decoder
+    /// rejects (a checksum or an escape it disagrees with, two frames run
+    /// together by a lost fragment) is exactly what a capture of an unknown
+    /// headset exists to show; it is kept here so [`write_fixtures`] spends a
+    /// counter on it and the gap shows, as [`Recorder`] does. It used to be
+    /// dropped here, with nothing counted and nothing said.
     pub frames: Vec<(u64, Direction, Vec<u8>)>,
+    /// Frames a link ended in the middle of: half a frame left over when a new
+    /// RFCOMM session started on its handle, or when the trace ended. Not in
+    /// `frames` -- there is no whole span to write or to place.
+    pub unfinished: usize,
 }
 
-/// One direction's piece of an RFCOMM stream: when, which way, what bytes.
-type Piece = (u64, Direction, Vec<u8>);
+impl Imported {
+    /// How many of [`Imported::frames`] do not unpack.
+    pub fn not_frames(&self) -> usize {
+        self.frames.iter().filter(|(_, _, wire)| frame::unpack(wire).is_err()).count()
+    }
+}
+
+/// Which stretch of one link a piece of an RFCOMM stream belongs to: the ACL
+/// handle, the L2CAP channel, and how many RFCOMM sessions (on the handle)
+/// and data links (on the DLCI) had begun when it was sent. Each stretch,
+/// each way, has a scanner of its own, so half a frame left by one link is
+/// never the start of the next -- which `Recorder::link_up` already held for
+/// the daemon's own recording, and the import did not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Stretch {
+    handle: u16,
+    cid: u16,
+    session: u32,
+    link: u32,
+}
+
+/// One direction's piece of an RFCOMM stream: when, which way, what bytes,
+/// and on which stretch of which link.
+type Piece = (u64, Direction, Vec<u8>, Stretch);
 
 /// A btsnoop file's MDR frames.
 ///
 /// `channel` picks the RFCOMM server channel; without it, the first DLCI (in
 /// order of first appearance) whose stream unpacks to at least one MDR frame
-/// is taken. Without L2CAP signalling in the file -- a trace started after the
-/// link came up -- every dynamic channel (CID 0x0040 and up) is tried as RFCOMM.
+/// is taken.
+///
+/// WHICH CHANNELS ARE TRIED. Every channel a PSM 3 request asked for and a
+/// success answered, and -- because a trace started late has no signalling
+/// for the link it started in the middle of -- every dynamic channel (CID
+/// 0x0040 and up) that no signalling in the file names at all. That second
+/// rule used to apply only to a file with no PSM 3 signalling anywhere, so a
+/// trace started late across a reconnect, which holds the second link's
+/// signalling and not the first's, silently lost every frame of the first.
+/// A channel signalling DOES name, for another PSM, is not tried: it is known
+/// not to be RFCOMM.
+///
+/// A NEW LINK IS A NEW STREAM. A PSM 3 request, or an RFCOMM SABM on DLCI 0,
+/// begins a new RFCOMM session on its handle; a SABM on the DLCI itself
+/// begins a new data link. See [`Stretch`].
 pub fn import(file: &[u8], channel: Option<u8>) -> Result<Imported, ImportError> {
+    use std::collections::HashMap;
     let pdus = reassemble(&acl_packets(file)?);
-    let channels = rfcomm_channels(&pdus);
+    let signalled = signalled(&pdus);
     let rfcomm = |p: &Pdu| {
-        if channels.is_empty() {
-            p.cid >= 0x0040
-        } else {
-            channels.iter().any(|(h, d, c)| *h == p.handle && *d == p.direction && *c == p.cid)
-        }
+        let triple = (p.handle, p.direction, p.cid);
+        signalled.rfcomm.contains(&triple) || (p.cid >= 0x0040 && !signalled.named.contains(&triple))
     };
+    let mut sessions: HashMap<u16, u32> = HashMap::new();
+    let mut links: HashMap<(u16, u8), u32> = HashMap::new();
     let mut streams: Vec<(u8, Vec<Piece>)> = Vec::new();
-    for p in pdus.iter().filter(|p| rfcomm(p)) {
+    for p in &pdus {
+        if asks_rfcomm(p) {
+            *sessions.entry(p.handle).or_default() += 1;
+            continue;
+        }
+        if !rfcomm(p) {
+            continue;
+        }
+        if let Some(dlci) = sabm(&p.payload) {
+            match dlci {
+                0 => *sessions.entry(p.handle).or_default() += 1,
+                d => *links.entry((p.handle, d)).or_default() += 1,
+            }
+            continue;
+        }
         let Some((dlci, info)) = uih(&p.payload) else { continue };
+        // DLCI 0 is the multiplexer's own control channel, never data.
         if dlci == 0 || info.is_empty() {
             continue;
         }
+        let stretch = Stretch {
+            handle: p.handle,
+            cid: p.cid,
+            session: sessions.get(&p.handle).copied().unwrap_or(0),
+            link: links.get(&(p.handle, dlci)).copied().unwrap_or(0),
+        };
+        let piece = (p.ms, p.direction, info.to_vec(), stretch);
         match streams.iter_mut().find(|(d, _)| *d == dlci) {
-            Some((_, s)) => s.push((p.ms, p.direction, info.to_vec())),
-            None => streams.push((dlci, vec![(p.ms, p.direction, info.to_vec())])),
+            Some((_, s)) => s.push(piece),
+            None => streams.push((dlci, vec![piece])),
         }
     }
     for (dlci, pieces) in streams {
         if channel.is_some_and(|c| c != dlci >> 1) {
             continue;
         }
-        let frames = split(&pieces);
-        if !frames.is_empty() {
-            return Ok(Imported { dlci, frames });
+        let (frames, unfinished) = split(&pieces);
+        // Chosen on a span that UNPACKS: junk alone does not make a DLCI the
+        // MDR channel.
+        if frames.iter().any(|(_, _, wire)| frame::unpack(wire).is_ok()) {
+            return Ok(Imported { dlci, frames, unfinished });
         }
     }
     Err(ImportError::NoStream)
 }
 
-/// Two byte streams, one per direction, into frames in wire order.
-fn split(pieces: &[Piece]) -> Vec<Piece> {
-    let mut rx = frame::Scanner::new();
-    let mut tx = frame::Scanner::new();
+/// One DLCI's pieces into frame-shaped spans in wire order, one scanner per
+/// stretch and direction, and the number of stretches that ended mid-frame.
+fn split(pieces: &[Piece]) -> (Vec<(u64, Direction, Vec<u8>)>, usize) {
+    use std::collections::HashMap;
+    let mut scanners: HashMap<(Stretch, bool), frame::Scanner> = HashMap::new();
     let mut out = Vec::new();
-    for (ms, direction, bytes) in pieces {
-        let scanner = if *direction == Direction::Rx { &mut rx } else { &mut tx };
+    for (ms, direction, bytes, stretch) in pieces {
+        let scanner = scanners.entry((*stretch, *direction == Direction::Rx)).or_default();
         scanner.push(bytes);
         while let Some(raw) = scanner.next_raw() {
-            if frame::unpack(&raw).is_ok() {
-                out.push((*ms, *direction, raw));
-            }
+            out.push((*ms, *direction, raw));
         }
     }
-    out
+    let unfinished = scanners.values().filter(|s| s.buffered() > 0).count();
+    (out, unfinished)
 }
 
-/// Write `imported` as fixtures in `dir`, one file per frame, counting from 1.
+/// Whether `name` is a command name either table declares -- the names
+/// `--exclude` takes. A name that is not one matches no frame, so excluding
+/// it would leave in whatever the person meant to keep out; `qs-sony import`
+/// refuses it instead.
+pub fn is_command_name(name: &str) -> bool {
+    T1_COMMANDS.iter().chain(T2_COMMANDS).any(|(_, n)| *n == name)
+}
+
+/// Write `imported` as fixtures in `dir`, one file per span, counting from 1.
 ///
 /// A frame whose command NAME is in `exclude` is not written, and its counter
-/// is still spent, so the gap says something was left out. Returns the names
-/// written.
+/// is still spent, so the gap says something was left out. A span that does
+/// not unpack has no name in the scheme and is not written either; its
+/// counter is spent the same way. Returns the names written.
 pub fn write_fixtures(imported: &Imported, dir: &Path, exclude: &[String]) -> io::Result<Vec<String>> {
     std::fs::create_dir_all(dir)?;
     let mut names = Vec::new();
@@ -704,22 +856,23 @@ impl Recorder {
 
 // ── what a capture settles ──────────────────────────────────────────────────
 
-/// A capture directory, read back: every frame in both directions, in name
-/// order, and the model the headset said it was.
+/// A capture directory, read back: every frame in both directions, in
+/// [`capture_order`], and the model the headset said it was.
 #[derive(Debug, Clone, Default)]
 pub struct Capture {
     pub model: Option<String>,
     pub frames: Vec<(Direction, DataType, Vec<u8>)>,
 }
 
-/// Every `.bin` in `dir` whose name says `-rx.` or `-tx.`, in name order.
+/// Every `.bin` in `dir` whose name says `-rx.` or `-tx.`, in
+/// [`capture_order`].
 pub fn load(dir: &Path) -> io::Result<Capture> {
     let mut names: Vec<String> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.ends_with(".bin") && (n.contains("-rx.") || n.contains("-tx.")))
         .collect();
-    names.sort();
+    capture_order(&mut names);
     let mut capture = Capture::default();
     for name in names {
         let Ok(f) = frame::unpack(&std::fs::read(dir.join(&name))?) else { continue };
@@ -741,6 +894,10 @@ pub fn load(dir: &Path) -> io::Result<Capture> {
 pub enum Verdict {
     /// The capture holds what settles it; the string says what that was.
     Settled(String),
+    /// The capture holds what settles it, and it settles it AGAINST this
+    /// package's reading; the string says what. Not settled, and not open
+    /// either: the code is what has to change.
+    Contradicted(String),
     /// It does not, yet.
     Open,
     /// Frames cannot settle it; the string says what does.
@@ -763,16 +920,77 @@ fn rx(c: &Capture) -> impl Iterator<Item = (DataType, &[u8])> {
     c.frames.iter().filter(|(d, _, _)| *d == Direction::Rx).map(|(_, t, p)| (*t, p.as_slice()))
 }
 
-/// The index of the first tx frame matching `is`, and every rx frame after it.
-fn after_tx(c: &Capture, is: impl Fn(&[u8]) -> bool) -> Option<(&[u8], Vec<&[u8]>)> {
-    let at = c.frames.iter().position(|(d, t, p)| *d == Direction::Tx && *t == DataType::DataMdr && is(p))?;
-    let sent = c.frames[at].2.as_slice();
-    let later = c.frames[at + 1..]
-        .iter()
-        .filter(|(d, t, _)| *d == Direction::Rx && *t == DataType::DataMdr)
-        .map(|(_, _, p)| p.as_slice())
-        .collect();
-    Some((sent, later))
+/// Frame `i`, if it went `direction` on table 1 and its payload satisfies `is`.
+fn t1(c: &Capture, i: usize, direction: Direction, is: impl Fn(&[u8]) -> bool) -> Option<&[u8]> {
+    let (d, t, p) = c.frames.get(i)?;
+    (*d == direction && *t == DataType::DataMdr && is(p)).then_some(p.as_slice())
+}
+
+/// Whether frame `i` is the headset's CONNECT_RET_PROTOCOL_INFO -- the first
+/// thing it says on every link, so the mark of a new one.
+fn relinks(c: &Capture, i: usize) -> bool {
+    t1(c, i, Direction::Rx, |p| p.first() == Some(&0x01)).is_some()
+}
+
+/// The last received table-1 payload before frame `at` satisfying `is`, on
+/// the same link -- what the headset said the value was before a write.
+fn before_on_link(c: &Capture, at: usize, is: impl Fn(&[u8]) -> bool) -> Option<&[u8]> {
+    for i in (0..at).rev() {
+        if let Some(p) = t1(c, i, Direction::Rx, &is) {
+            return Some(p);
+        }
+        if relinks(c, i) {
+            return None;
+        }
+    }
+    None
+}
+
+/// The received table-1 payloads after frame `at`, up to the next frame that
+/// `ends` the window or the next link, whichever is first.
+fn after_on_link(c: &Capture, at: usize, ends: impl Fn(&[u8]) -> bool) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    for i in at + 1..c.frames.len() {
+        if relinks(c, i) || t1(c, i, Direction::Tx, &ends).is_some() {
+            break;
+        }
+        if let Some(p) = t1(c, i, Direction::Rx, |_| true) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// A write that CHANGED something and was read back: the headset's value
+/// before it (on the same link, matching `reply`), the write, and the first
+/// reply after it (before the next write matching `write`, or the next link)
+/// -- found for any write in the capture, not only the first. `value` is the
+/// offset the value sits at in all three.
+///
+/// THE BEFORE IS REQUIRED. A write of the value already held, read back, is
+/// a write nobody can tell from one the headset ignored; and the session
+/// asks every value it writes when a link comes up, so a real capture has
+/// the before.
+fn changed_and_read_back(
+    c: &Capture,
+    write: impl Fn(&[u8]) -> bool,
+    reply: impl Fn(&[u8], &[u8]) -> bool,
+    value: usize,
+) -> Option<String> {
+    for at in 0..c.frames.len() {
+        let Some(sent) = t1(c, at, Direction::Tx, &write) else { continue };
+        let Some(before) = before_on_link(c, at, |p| reply(sent, p)) else { continue };
+        if before.get(value) == sent.get(value) {
+            continue;
+        }
+        let window = after_on_link(c, at, &write);
+        if let Some(back) = window.into_iter().find(|p| reply(sent, p)) {
+            if back.get(value) == sent.get(value) {
+                return Some(format!("{} then {} then {}", hex(before), hex(sent), hex(back)));
+            }
+        }
+    }
+    None
 }
 
 fn decodes(c: &Capture, want: impl Fn(&payload::Reading) -> bool) -> Option<Vec<u8>> {
@@ -797,23 +1015,103 @@ pub const ITEMS: &[Item] = &[
         decodes(c, |r| matches!(r, payload::Reading::Noise(_)))
             .map_or(Verdict::Open, |p| Verdict::Settled(format!("NCASM at 0x{:02x}: {}", p[1], hex(&p))))
     } },
-    Item { number: 4, title: "a connection-mode write that sticks", check: |c| {
-        let Some((sent, later)) = after_tx(c, |p| p.first() == Some(&0xE8)) else { return Verdict::Open };
-        match later.iter().find(|p| matches!(p.first(), Some(0xE7 | 0xE9)) && p.get(1) == sent.get(1)) {
-            Some(back) if back.get(2) == sent.get(2) => Verdict::Settled(format!("{} then {}", hex(sent), hex(back))),
-            _ => Verdict::Open,
+    // AUDIO_SET_PARAM AT A CONNECTION TYPE -- 0x00 or 0x02, the two
+    // `encode_connection` writes -- and NOT at UPSCALING (0x01), which is the
+    // same command byte carrying a DSEE write. Taking any 0xE8 let `dsee on`
+    // and its echo settle this, and the acceptance session sends `dsee on`
+    // after a `connection` the captured family refuses.
+    Item { number: 4, title: "a connection-mode write that changes the mode and is read back", check: |c| {
+        changed_and_read_back(
+            c,
+            |p| p.len() == 3 && p[0] == 0xE8 && matches!(p[1], 0x00 | 0x02),
+            |sent, p| p.len() == 3 && matches!(p[0], 0xE7 | 0xE9) && p.get(1) == sent.get(1),
+            2,
+        )
+        .map_or(Verdict::Open, Verdict::Settled)
+    } },
+    // PAUSE or PLAY, and a play status on the SAME LINK, before the next
+    // transport write, that says ENABLE and the status that control asks for
+    // -- after one on that link that said otherwise. PlaybackControl (T1:1284)
+    // and PlaybackStatus (T1:1307) put those names at different bytes: PAUSE
+    // 0x01 asks for PAUSE 0x02, PLAY 0x07 for PLAY 0x01. TRACK_UP and
+    // TRACK_DOWN change no status and settle nothing. Any status after the
+    // write used to do, including the one every new link asks for, so a
+    // reconnect settled a pause the headset ignored.
+    Item { number: 5, title: "a pause or play the headset's own status shows it acted on", check: |c| {
+        let status = |p: &[u8]| p.len() == 5 && matches!(p[0], 0xA3 | 0xA5) && p[1] == 0x01;
+        for at in 0..c.frames.len() {
+            let Some(sent) = t1(c, at, Direction::Tx, |p| p.len() == 4 && p[..3] == [0xA4, 0x01, 0x00]) else {
+                continue;
+            };
+            let want = match sent[3] {
+                0x01 => 0x02,
+                0x07 => 0x01,
+                _ => continue,
+            };
+            let Some(before) = before_on_link(c, at, status) else { continue };
+            if before[3] == want {
+                continue;
+            }
+            let window = after_on_link(c, at, |p| p.first() == Some(&0xA4));
+            if let Some(back) = window.into_iter().find(|p| status(p) && p[2] == 0x00 && p[3] == want) {
+                return Verdict::Settled(format!("{} then {} then {}", hex(before), hex(sent), hex(back)));
+            }
         }
+        Verdict::Open
     } },
-    Item { number: 5, title: "a transport command the headset acts on", check: |c| {
-        let Some((sent, later)) = after_tx(c, |p| p.first() == Some(&0xA4)) else { return Verdict::Open };
-        later.iter().find(|p| matches!(p.first(), Some(0xA3 | 0xA5)))
-            .map_or(Verdict::Open, |back| Verdict::Settled(format!("{} then {}", hex(sent), hex(back))))
-    } },
-    Item { number: 6, title: "a general-setting write read back in the same polarity", check: |c| {
-        let Some((sent, later)) = after_tx(c, |p| p.first() == Some(&0xD8)) else { return Verdict::Open };
-        later.iter().find(|p| matches!(p.first(), Some(0xD7 | 0xD9)) && p.get(1) == sent.get(1))
-            .filter(|back| back.get(3) == sent.get(3))
-            .map_or(Verdict::Open, |back| Verdict::Settled(format!("{} then {}", hex(sent), hex(back))))
+    // POLARITY IS NOT SETTLED BY A READ-BACK. SET, RET and NTFY all carry the
+    // same `GsSettingValue` at offset 3 (T1:4177, 4267, 4323), so a headset
+    // that stores the byte it was sent returns it under either reading, and
+    // a write read back said nothing about which byte means ON -- it settled
+    // this item under the old, wrong polarity as readily as under the right
+    // one. What tells them apart is the one the fix was made from: two peers
+    // CONNECTED at once (the paired-device list, status non-zero) can only be
+    // multipoint on, so the multipoint slot read on the same link must decode
+    // as on. Decoded off there, the capture contradicts this package.
+    Item { number: 6, title: "multipoint read as on while two peers are connected", check: |c| {
+        let reading = |i: usize| t1(c, i, Direction::Rx, |_| true).map(|p| (p, payload::decode(DataType::DataMdr, p)));
+        let slot = c.frames.iter().find_map(|(d, t, p)| match payload::decode(*t, p) {
+            payload::Reading::GeneralSettingInfo(info) if *d == Direction::Rx && info.name == "MULTIPOINT_SETTING" => {
+                Some(info.slot)
+            }
+            _ => None,
+        });
+        let Some(slot) = slot else { return Verdict::Open };
+        for (at, (d, t, p)) in c.frames.iter().enumerate() {
+            let payload::Reading::PairedDevices(devices) = payload::decode(*t, p) else { continue };
+            let connected = devices.iter().filter(|peer| peer.status != 0).count();
+            if *d != Direction::Rx || connected < 2 {
+                continue;
+            }
+            // The multipoint reading nearest it on the same link: the last
+            // before, else the first after.
+            let mut found = None;
+            for i in (0..at).rev() {
+                if relinks(c, i) {
+                    break;
+                }
+                if let Some((q, payload::Reading::GeneralSettingParam { slot: s, enabled })) = reading(i) {
+                    if s == slot {
+                        found = Some((q, enabled));
+                        break;
+                    }
+                }
+            }
+            for i in at + 1..c.frames.len() {
+                if found.is_some() || relinks(c, i) {
+                    break;
+                }
+                if let Some((q, payload::Reading::GeneralSettingParam { slot: s, enabled })) = reading(i) {
+                    if s == slot {
+                        found = Some((q, enabled));
+                    }
+                }
+            }
+            let Some((q, enabled)) = found else { continue };
+            let what = format!("{} with {connected} peers connected ({})", hex(q), hex(&p[..2]));
+            return if enabled { Verdict::Settled(what) } else { Verdict::Contradicted(what) };
+        }
+        Verdict::Open
     } },
     Item { number: 7, title: "the kernel reads the socket address back", check: |_| {
         Verdict::NotFromFrames("cargo test -- --ignored on the capture machine")
@@ -822,7 +1120,9 @@ pub const ITEMS: &[Item] = &[
         decodes(c, |r| matches!(r, payload::Reading::UpscalingStatus { available: payload::Switch::Off }))
             .map_or(Verdict::Open, |p| Verdict::Settled(hex(&p)))
     } },
-    Item { number: 11, title: "table 2's four families on a WH-1000XM5", check: |c| {
+    // The four readings plan 23 added. The paired-device list, table 2's
+    // fifth, was read before it and is not this item's.
+    Item { number: 11, title: "table 2's four new readings on a WH-1000XM5", check: |c| {
         let seen = |want: fn(&payload::Reading) -> bool| decodes(c, want).is_some();
         let all = seen(|r| matches!(r, payload::Reading::VoiceGuidance(v) if v.enabled.is_some()))
             && seen(|r| matches!(r, payload::Reading::VoiceGuidance(v) if v.volume.is_some()))
@@ -833,35 +1133,45 @@ pub const ITEMS: &[Item] = &[
     Item { number: 13, title: "the page drawn against a live document", check: |_| {
         Verdict::NotFromFrames("a screenshot of the Headphones page, docs/CAPTURE.md")
     } },
-    // A write, then a NEW LINK -- the headset's CONNECT_RET_PROTOCOL_INFO
-    // again -- then the same slot read back with the same value. The alert a
-    // multipoint write raises with `--alerts` on is reported beside it, not
-    // required: it is how the write is confirmed, not what persists.
+    // A write that CHANGES the slot -- the headset said otherwise on the same
+    // link before it -- then a NEW LINK (the headset's CONNECT_RET_PROTOCOL_
+    // INFO again), then the same slot read back with the written value. Any
+    // write of any D8 counts, not only the first. A write of the value
+    // already held would survive a reconnect whether or not the headset kept
+    // it. The alert a multipoint write raises with `--alerts` on is reported
+    // beside it, not required: it is how the write is confirmed, not what
+    // persists.
     Item { number: 14, title: "a general-setting write that survives a reconnect", check: |c| {
-        let frames = &c.frames;
-        let Some(write) = frames.iter().position(|(d, _, p)| *d == Direction::Tx && p.first() == Some(&0xD8)) else {
-            return Verdict::Open;
-        };
-        let sent = frames[write].2.as_slice();
-        let Some(relink) = frames[write..].iter().position(|(d, t, p)| {
-            *d == Direction::Rx && *t == DataType::DataMdr && p.first() == Some(&0x01)
-        }) else {
-            return Verdict::Open;
-        };
-        let back = frames[write + relink..].iter().find(|(d, _, p)| {
-            *d == Direction::Rx && p.first() == Some(&0xD7) && p.get(1) == sent.get(1)
-        });
-        let Some((_, _, back)) = back.filter(|(_, _, p)| p.get(3) == sent.get(3)) else { return Verdict::Open };
-        let alert = decodes(c, |r| matches!(r, payload::Reading::Alert { .. }))
-            .map_or_else(|| "no alert".to_string(), |a| format!("alert {}", hex(&a)));
-        Verdict::Settled(format!("{} then, after a reconnect, {}; {alert}", hex(sent), hex(back)))
+        let param = |slot: u8| move |p: &[u8]| p.len() == 4 && matches!(p[0], 0xD7 | 0xD9) && p[1] == slot;
+        for write in 0..c.frames.len() {
+            let Some(sent) = t1(c, write, Direction::Tx, |p| p.len() == 4 && p[0] == 0xD8) else { continue };
+            let Some(before) = before_on_link(c, write, param(sent[1])) else { continue };
+            if before[3] == sent[3] {
+                continue;
+            }
+            let Some(relink) = (write + 1..c.frames.len()).find(|i| relinks(c, *i)) else { continue };
+            let back = (relink + 1..c.frames.len())
+                .take_while(|i| !relinks(c, *i))
+                .find_map(|i| t1(c, i, Direction::Rx, |p| param(sent[1])(p) && p[0] == 0xD7));
+            let Some(back) = back.filter(|p| p[3] == sent[3]) else { continue };
+            let alert = decodes(c, |r| matches!(r, payload::Reading::Alert { .. }))
+                .map_or_else(|| "no alert".to_string(), |a| format!("alert {}", hex(&a)));
+            return Verdict::Settled(format!(
+                "{} then {} then, after a reconnect, {}; {alert}",
+                hex(before),
+                hex(sent),
+                hex(back)
+            ));
+        }
+        Verdict::Open
     } },
 ];
 
 /// Every item against `capture`.
 ///
 /// A frame-settled item is `Open` unless the capture is of [`TARGET_MODEL`]:
-/// the same bytes from another model are evidence about that model.
+/// the same bytes from another model are evidence about that model -- and a
+/// contradiction from another model is too.
 pub fn settle(capture: &Capture) -> Vec<(&'static Item, Verdict)> {
     let target = capture.model.as_deref().is_some_and(|m| m.contains(TARGET_MODEL));
     ITEMS
@@ -869,7 +1179,7 @@ pub fn settle(capture: &Capture) -> Vec<(&'static Item, Verdict)> {
         .map(|item| {
             let verdict = (item.check)(capture);
             let verdict = match verdict {
-                Verdict::Settled(_) if !target => Verdict::Open,
+                Verdict::Settled(_) | Verdict::Contradicted(_) if !target => Verdict::Open,
                 other => other,
             };
             (item, verdict)

@@ -5,6 +5,9 @@
 //!     qs-sonyd --alerts           also ask the headset for its confirmations
 //!     qs-sonyd --record=DIR       also write every frame, both ways, as fixtures
 //!
+//! Any other flag, a `--record` with no directory, or `--alerts=` anything is
+//! refused with exit 2 before anything starts.
+//!
 //! Speaks the MDR protocol to a connected Sony headset over RFCOMM, publishes
 //! its state as JSON, and takes commands on a private Unix socket. It is a
 //! native replacement for `sony-headphones-linux` and keeps that daemon's
@@ -157,6 +160,15 @@ enum Msg {
 ///
 /// The engine is told the time rather than asking, so one clock reads it and
 /// everything downstream is a pure function of the sequence.
+/// A flag given in a shape it does not take: said on stderr and as the usual
+/// envelope, with `emit::REFUSED` -- 2, nothing was attempted -- the status
+/// `emit::unknown_flag` gives a flag that is not known at all.
+fn refuse(message: &str) -> ExitCode {
+    eprintln!("qs-sonyd: {message}");
+    let _ = emit::json(&serde_json::json!({ "ok": false, "error": message }));
+    ExitCode::from(emit::REFUSED)
+}
+
 fn now(began: Instant) -> u64 {
     began.elapsed().as_millis() as u64
 }
@@ -168,6 +180,23 @@ fn main() -> ExitCode {
         "once" => true,
         other => return emit::unknown_command("qs-sonyd", other, &["run", "once"]),
     };
+    // REFUSED, NOT IGNORED, and before anything is bound -- the policy
+    // `support::cli`'s header gives for a helper whose callers read the exit
+    // status: this is started by `sony-daemon-process start` and by a person
+    // at a terminal, and no QML `Process` passes it a flag. Both flags change
+    // what a capture session gets, so a typo that was waved through ran the
+    // session without it: `--alert` ran with alerts off, a bare `--record`
+    // recorded nothing, and `--alerts=no` turned alerts ON, because `has`
+    // reads the name and not the value. Each now exits 2 with nothing done.
+    if let Some(code) = args.reject_unknown(&["alerts", "record"]) {
+        return code;
+    }
+    if args.value("alerts").is_some() {
+        return refuse("--alerts takes no value; leave it out to keep alerts off");
+    }
+    if args.has("record") && args.value("record").is_none_or(str::is_empty) {
+        return refuse("--record needs a directory: --record=DIR");
+    }
 
     let socket = sony::socket_path();
     let bound = match serve::bind(&socket) {
@@ -191,6 +220,13 @@ fn main() -> ExitCode {
     // has the long form.
     let session = Session::new(sony::DAEMON_VERSION.to_string(), Limits::default())
         .with_alerts(args.has("alerts"));
+    // Said in the log, because a capture session's whole point is that it
+    // ran with alerts on, and nothing else here shows it until a headset
+    // asks something. `a_one_shot_run_says_whether_it_asks_for_alerts` reads
+    // this line, and it is the only check on the flag reaching the session.
+    if session.alerts() {
+        eprintln!("qs-sonyd: --alerts: the headset will be asked for its confirmations");
+    }
     // Opened before the link exists, so a directory that cannot be made fails
     // the start rather than the first frame. `capture::Recorder` says what
     // the files are and why the directory is private.

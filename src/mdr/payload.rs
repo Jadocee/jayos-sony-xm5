@@ -27,8 +27,11 @@
 //!
 //! `tests/fixtures/mdr/PROVENANCE.md` carries the measurement and enumerates
 //! the 21 that genuinely differ. Two of those are on messages this daemon
-//! would speak, and neither has a capture to settle it -- so they are refused
-//! by name rather than guessed at.
+//! would speak, and no capture settles either. One -- the NC/ASM NTFY at
+//! 0x13 -- is refused by name rather than guessed at ([`AMBIGUOUS`]). The
+//! other, the play-status pair, is read only on the offsets both of its
+//! structs agree on, and never on the byte they dispute
+//! ([`decode_play_status`]); fixture 000065 is one.
 //!
 //! WHAT IS DECODED, AND WHAT IS NOT
 //!
@@ -406,6 +409,31 @@ impl AmbientRange {
     pub fn admits(self, level: i32) -> bool {
         let (min, max, step) = (i32::from(self.min), i32::from(self.max), i32::from(self.step));
         (min..=max).contains(&level) && (level - min) % step == 0
+    }
+
+    /// The levels this range admits that also lie in `lo..=hi`, as a range on
+    /// the same steps -- or `None` when there are none.
+    ///
+    /// For the document: the command language admits 1..=20 whatever a
+    /// headset states (`sony::command`), so the levels a page can actually
+    /// set are the ones BOTH admit. The result admits a level exactly when
+    /// this range and `lo..=hi` both do, which `the_published_range_is_the_one_in_force`
+    /// holds over every level.
+    pub fn within(self, lo: u8, hi: u8) -> Option<AmbientRange> {
+        let (min, max, step) = (u32::from(self.min), u32::from(self.max), u32::from(self.step).max(1));
+        let (lo, hi) = (u32::from(lo), u32::from(hi));
+        // The first level on this range's steps at or above `lo`, and the
+        // last at or below both tops.
+        let first = if min >= lo { min } else { min + (lo - min).div_ceil(step) * step };
+        let top = max.min(hi);
+        if top < min {
+            return None;
+        }
+        let last = min + (top - min) / step * step;
+        if first > last {
+            return None;
+        }
+        Some(AmbientRange { voice: self.voice, min: u8::try_from(first).ok()?, max: u8::try_from(last).ok()?, step: self.step })
     }
 }
 
@@ -1269,15 +1297,16 @@ pub fn decode(data_type: super::DataType, payload: &[u8]) -> Reading {
     //
     // Every decoder below this line reads a TABLE 1 message, and a command
     // byte alone does not say which table a frame is on. The two enums overlap
-    // on 45 bytes; five of the ones this port names mean something else
+    // on 45 bytes; six of the ones this port names mean something else
     // entirely on table 2:
     //
-    //     byte   this port calls it   table 2 declares it
-    //     0x53   EQEBB_RET_STATUS     SAFE_LISTENING_RET_STATUS
-    //     0x57   EQEBB_RET_PARAM      SAFE_LISTENING_RET_PARAM
-    //     0x59   EQEBB_NTFY_PARAM     SAFE_LISTENING_NTFY_PARAM
-    //     0x67   NCASM_RET_PARAM      LEA_RET_PARAM
-    //     0x69   NCASM_NTFY_PARAM     LEA_NTFY_PARAM
+    //     byte   this port calls it     table 2 declares it
+    //     0x53   EQEBB_RET_STATUS       SAFE_LISTENING_RET_STATUS
+    //     0x57   EQEBB_RET_PARAM        SAFE_LISTENING_RET_PARAM
+    //     0x59   EQEBB_NTFY_PARAM       SAFE_LISTENING_NTFY_PARAM
+    //     0x61   NCASM_RET_CAPABILITY   LEA_RET_CAPABILITY
+    //     0x67   NCASM_RET_PARAM        LEA_RET_PARAM
+    //     0x69   NCASM_NTFY_PARAM       LEA_NTFY_PARAM
     //
     // The captured WF-1000XM5 advertises safe listening AND LE Audio on table
     // 2, so this is a device that sends 0x57 and 0x67 frames meaning neither
@@ -1315,8 +1344,9 @@ pub fn decode(data_type: super::DataType, payload: &[u8]) -> Reading {
     // produces a plausible reading of the wrong message. That argument is
     // about the NAMES, though, not about the channel -- the fix is a second
     // decoder, not a permanent silence. The corpus contains five table-2
-    // frames beyond the support list; the daemon logged them as undecodable
-    // until plan 23, and now reads all five.
+    // frames beyond the support list. The paired-device list (000077) was
+    // read before plan 23; the daemon logged the other four as undecodable
+    // until then, and now reads all five.
     //
     // `decode_table_two` matches on `message.command.to_byte()` and never on a
     // `Command` variant, so no table-1 name can leak across. The round trip
@@ -1703,8 +1733,7 @@ fn decode_upscaling_status(message: &Message) -> Option<Reading> {
 ///
 ///   0x02  CONNECTION_MODE_WITH_LDAC_STATUS. The RET, the SET (T1:3084) and
 ///         the NTFY (T1:2637) all PIN the type with `CODEGEN EnumRange` and
-///         are field-identical: command, type, `PriorMode`. HEADER ONLY, but
-///         the strongest header-only there is -- a pinned triple.
+///         are field-identical: command, type, `PriorMode`. HEADER ONLY.
 ///   0x00  CONNECTION_MODE. The RET's type is `Ignore`, not pinned, and the
 ///         NTFY twin (`AudioNtfyParamConnection`, T1:2609) declares a
 ///         different default type altogether. What makes 0x00 readable is the
@@ -1712,9 +1741,23 @@ fn decode_upscaling_status(message: &Message) -> Option<Reading> {
 ///         struct when a headset advertises t1 0xE1
 ///         (`HeadphonesV2.cpp:179-181`, `HeadphonesV2T1.cpp:598-613`).
 ///
+/// AND THE VALUE IS PINNED, which those grounds cover only half of. Every
+/// connection struct carries `CODEGEN EnumRange PriorMode::CONNECTION_QUALITY_
+/// PRIOR` on `settingValue` (T1:2807, 2820 for the RETs), and libmdr's
+/// generated validation rejects any other value as it deserializes
+/// (`ProtocolV2T1Validation.cpp:470,479`) -- so libmdr reads `stable` here and
+/// drops a reply saying anything else. This reads SOUND_QUALITY_PRIOR as
+/// `quality` anyway, because `PriorMode` (T1:1399) names it and a headset
+/// sending it is a fact worth showing; [`grounds`] reports such a reading as
+/// [`Grounds::AgainstHeader`], not as the key's tier. `encode_connection`
+/// says why the write side does the same.
+///
 /// No capture holds either: the WF-1000XM5 advertises neither 0xE1 nor 0xE3.
-/// Three bytes at either type and nothing else -- 0x05, the LE Audio form, is
-/// four bytes with the `value2` the encoder refuses over, and is not read.
+/// Three bytes at either type and nothing else. 0x05, the LE Audio form, has
+/// no RET in the header at all, and its two NTFYs -- three bytes
+/// (`AudioNtfyParamConnection`, T1:2609) and four ending in a
+/// `SwitchingStream` (T1:2622) -- are not read; the `value2` the encoder
+/// refuses over is the SET's (T1:3069).
 fn decode_connection(message: &Message) -> Option<Reading> {
     let kind = message.kind?;
     if !matches!(kind, 0x00 | 0x02) || message.len != 3 {
@@ -1750,7 +1793,13 @@ fn decode_play_status(message: &Message) -> Option<Reading> {
 /// for the reading: libmdr deserializes exactly this when a headset
 /// advertises FIXED_MESSAGE (t1 0x90) and treats POSITIVE_NEGATIVE as a
 /// question to put to the person (`HeadphonesV2T1.cpp:918-940`). No capture
-/// holds one: the recording app never enabled alerts.
+/// holds one, because the headset asked nothing while the corpus was
+/// recorded -- NOT because alerts were off. The recorder very likely enabled
+/// them: libmdr sends `94 00 00` to a headset advertising FIXED_MESSAGE
+/// (`HeadphonesV2.cpp:88-90`), this one advertises it (fixture 000022), and
+/// fixture 000049 is an ACK with no reply after it at the point in libmdr's
+/// order where that request falls. Read evidence; the host's half was not
+/// recorded.
 ///
 /// Both bytes are carried raw. [`alert_message_name`] and
 /// [`alert_action_word`] name them where the document is written, because a
@@ -1881,12 +1930,32 @@ pub fn alert_message_name(byte: u8) -> Option<&'static str> {
     ALERT_MESSAGES.iter().find(|(b, _)| *b == byte).map(|(_, name)| *name)
 }
 
-/// Whether answering yes to this alert makes the headset drop the link: every
-/// `DISCONNECT_*` message, and `NEED_DISCONNECTION_FOR_UPDATING_FIRMWARE`.
-/// By name, because the names are the only statement of it the reference
-/// makes.
+/// Whether answering yes to this alert makes the headset drop a link.
+///
+/// BY NAME, because the names are the only statement of it the reference
+/// makes: libmdr's `HandleAlertParamT1` (`HeadphonesV2T1.cpp:918-940`) stores
+/// the message and acts on none. So the rule is what the name SAYS, wherever
+/// in the name it says it -- not a prefix, which is what this was, and which
+/// missed `CAUTION_FOR_DISABLE_TOUCH_SENSOR_PANEL_AND_RECONNECTION` (0x0B), the
+/// one a WH-1000XM5's own touch-panel setting would raise:
+///
+/// - `DISCONNECT` anywhere: every `DISCONNECT_*` message,
+///   `NEED_DISCONNECTION_FOR_UPDATING_FIRMWARE` (0x02), and
+///   `FOREGROUND_CAUTION_NEED_DISCONNECTION_FOR_ENABLING_WAKE_WORD` (0x19) --
+///   which the header pins to the APP_BECOMES_FOREGROUND form this port does
+///   not read (T1:2065-2076), and which says the same thing if it ever
+///   arrives as a fixed message, whose message field takes any value.
+/// - `RECONNECTION` anywhere: the touch-panel and voice-assistant cautions
+///   that end `..._AND_RECONNECTION` (0x0B, 0x0D, 0x10, 0x11, 0x14, 0x15).
+/// - EXCEPT `GATT_DISCONNECTION` (0x1F, `CAUTION_FOR_GATT_DISCONNECTION_FOR_SAR`):
+///   GATT is the LE link, not the RFCOMM one this daemon holds.
+///
+/// `an_alert_is_read_raw_and_named_from_the_header` pins the whole set over
+/// all 256 bytes, so a change to the rule is a change a test sees.
 pub fn alert_disconnects(byte: u8) -> bool {
-    alert_message_name(byte).is_some_and(|n| n.starts_with("DISCONNECT_") || n.starts_with("NEED_DISCONNECTION_"))
+    alert_message_name(byte).is_some_and(|n| {
+        (n.contains("DISCONNECT") || n.contains("RECONNECTION")) && !n.contains("GATT_DISCONNECTION")
+    })
 }
 
 /// `AlertActionType` (T1:47-53) as a lowercase word: what kind of answer the
@@ -2467,8 +2536,10 @@ fn decode_noise_capability(message: &Message) -> Option<Reading> {
 /// it is a value, and `qs-sony decode` prints it beside every frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Grounds {
-    /// A real headset sent this exact key, and it decoded to values that
-    /// came out sensible. The corpus in `tests/fixtures/mdr/` holds it.
+    /// A real headset sent this key -- [`Key`]'s, with a volunteered NTFY
+    /// standing where its RET does on either table -- and it decoded to
+    /// values that came out sensible. The corpus in `tests/fixtures/mdr/`
+    /// holds it.
     Captured,
     /// The meaning is the reference client's: libmdr decodes this key the
     /// same way, and people run libmdr against real headsets. The bytes may
@@ -2480,6 +2551,13 @@ pub enum Grounds {
     /// Transcribed from the reference header. Nothing has been seen sending
     /// it, and nothing but the header says what it means.
     HeaderOnly,
+    /// A value the reference header's own `CODEGEN EnumRange` on the field
+    /// excludes, read because the field's enum names it. Whatever its key
+    /// stands on, this READING stands on less: the header says it will not
+    /// come. The connection mode's SOUND_QUALITY_PRIOR is the case; see
+    /// `decode_connection`. The write side's twin is
+    /// `encode::Evidence::AgainstHeader`.
+    AgainstHeader,
 }
 
 impl Grounds {
@@ -2489,12 +2567,39 @@ impl Grounds {
             Grounds::ReferenceClient => "reference-client",
             Grounds::ThirdParty => "third-party",
             Grounds::HeaderOnly => "header-only",
+            Grounds::AgainstHeader => "against-header",
         }
     }
 }
 
 /// `(data type, canonical command, inquired type)`.
+///
+/// CANONICAL ON BOTH TABLES: a NTFY is keyed as the RET it twins, because a
+/// volunteered change is the same message as the reply to a question and a
+/// headset seen sending one has been seen sending the other's layout. Table
+/// 1 by [`Command::canonical`]; table 2 by the two twins `decode_table_two`
+/// accepts, PERI_NTFY_STATUS (0x35) onto PERI_RET_STATUS (0x33) and
+/// PERI_NTFY_PARAM (0x39) onto PERI_RET_PARAM (0x37). Table 2 used to be
+/// keyed on the raw byte, so a pairing-list NTFY came out header-only while
+/// the identical RET was captured.
 pub type Key = (u8, u8, u8);
+
+/// The [`Key`] a payload is grounded by, or `None` for one too short to
+/// have a type.
+pub fn key(data_type: super::DataType, payload: &[u8]) -> Option<Key> {
+    let (&command, &kind) = (payload.first()?, payload.get(1)?);
+    let wire = data_type.to_wire();
+    let command = match wire {
+        T1 => Command::from_byte(command).canonical().to_byte(),
+        T2 => match command {
+            0x35 => 0x33,
+            0x39 => 0x37,
+            other => other,
+        },
+        _ => command,
+    };
+    Some((wire, command, kind))
+}
 
 const T1: u8 = 0x0C;
 const T2: u8 = 0x0E;
@@ -2561,7 +2666,8 @@ pub const OTHER_GROUNDS: &[(Key, Grounds, &str)] = &[
         Grounds::ReferenceClient,
         "libmdr HeadphonesV2T1.cpp HandleAudioParamT1, CONNECTION_MODE as AudioRetParamConnection",
     ),
-    // Plan 23 item 14. No capture: the recording app never enabled alerts.
+    // Plan 23 item 14. No capture: the headset asked nothing while the corpus
+    // was recorded. See `decode_alert`.
     ((T1, 0x99, 0x00), Grounds::ReferenceClient, "libmdr HeadphonesV2T1.cpp HandleAlertParamT1, FIXED_MESSAGE"),
     // Table 2, plan 23 item 11. The corpus holds the bytes of all four; what
     // they mean is the header's types and libmdr's reading of them. See
@@ -2574,13 +2680,15 @@ pub const OTHER_GROUNDS: &[(Key, Grounds, &str)] = &[
 
 /// The grounds a decoded frame stands on, or `None` when nothing decodes it.
 pub fn grounds(data_type: super::DataType, payload: &[u8]) -> Option<Grounds> {
-    if matches!(decode(data_type, payload), Reading::Unhandled { .. } | Reading::Ambiguous { .. }) {
-        return None;
+    match decode(data_type, payload) {
+        Reading::Unhandled { .. } | Reading::Ambiguous { .. } => return None,
+        // The value, not the key: see `decode_connection`.
+        Reading::Connection { prior, .. } if prior != PriorMode::ConnectionQuality => {
+            return Some(Grounds::AgainstHeader);
+        }
+        _ => {}
     }
-    let (&command, &kind) = (payload.first()?, payload.get(1)?);
-    let wire = data_type.to_wire();
-    let command = if wire == T1 { Command::from_byte(command).canonical().to_byte() } else { command };
-    let key = (wire, command, kind);
+    let key = key(data_type, payload)?;
     if CAPTURED.contains(&key) {
         return Some(Grounds::Captured);
     }

@@ -5,9 +5,9 @@ evidence behind it. This document lists the kinds, where they show, what each
 read and write stands on today, and the sources they cite. Dated 2026-10-02;
 the tables were measured from the code on that date.
 
-## The four kinds
+## The five kinds
 
-Weakest last. The same four on both sides, named for what they are.
+Weakest last. The same five on both sides, named for what they are.
 
 | Kind | Read side (`mdr::payload::Grounds`) | Write side (`mdr::encode::Evidence`) |
 |---|---|---|
@@ -15,6 +15,13 @@ Weakest last. The same four on both sides, named for what they are.
 | Reference client | libmdr reads it this way, and people run libmdr against real headsets; the bytes may be captured, the meaning was not settled by them alone | `ReferenceClient`: libmdr sends these bytes for this request |
 | Third party | another project reports a real headset sending or taking it | `ThirdParty`: another project sends these bytes and reports them working |
 | Header only | transcribed from the reference header; nothing seen | `HeaderOnly`: transcribed from the header, no frame either way |
+| Against the header | a value the header's own `CODEGEN EnumRange` on the field excludes, read because the field's enum names it | `AgainstHeader`: the same, sent |
+
+A key is `(data type, command, inquired type)` with a NTFY keyed as the RET it
+twins, on either table: a volunteered change stands where the reply to a
+question does. The fifth kind is the exception that looks at the value rather
+than the key -- today, the connection mode's SOUND_QUALITY_PRIOR, which every
+connection struct pins out (`decode_connection`, `encode_connection`).
 
 Where they show:
 
@@ -37,15 +44,16 @@ Measured by encoding every verb against the WF-1000XM5 corpus's facts:
 | `speak-to-chat` | mirrored capture | `SystemSetParamSmartTalking` | `f8 0c ...` |
 | `dsee` | mirrored capture | `AudioSetParamUpscaling` | `e8 01 ...` |
 | `eq-preset`, `eq-band`, `clear-bass` | mirrored capture | `EqEbbSetParamEq` | `58 00 ...` |
-| `general` | mirrored capture | `GeneralSettingSetParam` | `d8 <slot> 00 <value>` |
+| `general` | mirrored capture | `GsSetParamBoolean` | `d8 <slot> 00 <value>` |
 | `volume` | mirrored capture | `SetPlayParamPlaybackControllerVolume` | `a8 20 ...` |
 | `playback` | reference client | `SetPlayStatusPlaybackController` | `a4 01 00 <control>` |
 | `connection` | refused on this headset (`value2`) | -- | -- |
 | `alert` | refused until the headset asks | -- | -- |
 
 On other headsets: NC/ASM at 0x19 is reference client and at 0x15 third party;
-`connection` is header only at 0x02 and third party at 0x00; `alert yes|no` is
-header only; the alerts opt-in `94 00 00` is reference client.
+`connection stable` is header only at 0x02 and third party at 0x00, and
+`connection quality` is against the header at both; `alert yes|no` is header
+only; the alerts opt-in `94 00 00` is reference client.
 
 ## The reads that are not captured
 
@@ -61,8 +69,11 @@ header only; the alerts opt-in `94 00 00` is reference client.
 | t2 0x33 at 0x02, 0x47 at 0x01 and 0x20, 0x5B at 0x03 | reference client | the corpus's bytes, libmdr's `HandleCommandV2T2` meanings |
 
 Everything else decodable and not captured -- the over-ear battery forms, the
-ambient range, the connection mode at 0x02, NTFY twins with no capture -- is
-header only.
+ambient range, the connection mode at 0x02, and a NTFY whose RET twin is
+neither captured nor listed -- is header only. A NTFY whose RET twin is
+captured or listed takes that RET's kind: the corpus holds no NTFY frame at
+all, so every NTFY's kind is its twin's. A connection reading of anything
+but CONNECTION_QUALITY_PRIOR is against the header, whatever its key.
 
 ## Sources
 

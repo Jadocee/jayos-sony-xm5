@@ -67,6 +67,7 @@ fi
 # fails here even though nothing ran.
 missing=""
 for want in "btmon -w $WORK/capture/trace.btsnoop" \
+            "connect a second device" \
             "qs-sonyd run --alerts --record=$WORK/capture/record" \
             "qs-sony send connection stable" \
             "qs-sony send playback pause" \

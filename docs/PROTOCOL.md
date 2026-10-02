@@ -9,7 +9,9 @@ cites the reference by line. `tests/fixtures/mdr/PROVENANCE.md` is the corpus,
 and `docs/EVIDENCE.md` is what every claim stands on.
 
 Three sections below MOVED HERE from jayos when the integration did, verbatim,
-from jayos commit `16acd81`: they are history, and are kept as written.
+from jayos commit `16acd81`: they are history, and are kept as written --
+except where plan 23 found a statement in them wrong, which carries a
+bracketed note saying so and what is true now, as `PROVENANCE.md` does.
 **Paths in them are jayos's at that commit**: `rust/crates/qs-hw/src/X` there
 is `src/X` here, a bare `sony/...` or `mdr/...` is under `src/`, and line
 numbers are that commit's. jayos scripts they name (`sony-daemon.sh`,
@@ -46,8 +48,10 @@ and before `last_error`, top-level, so the reference's own objects keep their
 shape: `general_settings`, `paired_devices`, `ambient_range`,
 `dsee_available`, `voice_guidance`, `safe_listening`, `pairing_mode` and
 `alert`. `tests/sony_contract.rs` takes them out and holds what is left to the
-C++ daemon's document byte for byte. The command language adds `general` and
-`alert`; the rest is the C++ daemon's.
+C++ daemon's document byte for byte. The command language adds four verbs --
+`eq-band`, `clear-bass`, `general` and `alert` -- and the rest is the C++
+daemon's (`tests/sony_contract.rs` parses the first two as ours, and
+`sony::command` marks `alert` so).
 
 ### What the daemon shares with `sony-headphones-linux`
 
@@ -103,7 +107,8 @@ with no radio.
   ignored; the C++ daemon dials only after `panel-open`, so the Headphones page
   sends it when it opens and `panel-close` when it is hidden or closed.
 * **Three verbs the C++ daemon does not have**, `eq-band <1..10> <-10..10>`,
-  `clear-bass <-10..10>` and `general <setting> on|off`. Extending the command
+  `clear-bass <-10..10>` and `general <setting> on|off`. *[Four since plan 23
+  added `alert yes|no`.]* Extending the command
   language is allowed where
   narrowing it is not: the contract is that a client written against the
   reference gets the same answer here, and a verb it never sends cannot break
@@ -186,7 +191,8 @@ not enforced counts: `tools/test-counts.sh` deliberately holds no number about
 another repository. What it has that this tree cannot have is a WH-1000XM5 and a
 WF-1000XM5 on a desk, so its `docs/protocol.md` and `docs/hardening.md` are
 empirical where everything here is read. Five things came out of it, in
-descending order of how much they mattered:
+descending order of how much they mattered: *[six are numbered below; the
+sixth, the paired-device list, was added after this sentence was written.]*
 
 1. **Two holes in this tree's own filesystem handling**, from
    `docs/hardening.md`, "The runtime directory" — reported there against their
@@ -265,7 +271,11 @@ descending order of how much they mattered:
 
    **Executed**, against the four captures: fixtures 000031/000035 (sidetone,
    on) and 000039/000043 (multipoint, off) decode by hand to what the decoders
-   produce, and twenty-two mutations were run — thirteen on the Rust and nine
+   produce *[and the polarity was backwards: `GsSettingValue` is ON = 0x00
+   (T1:956), so 000035 is sidetone OFF and 000043 multipoint ON -- which
+   000077's two connected peers had said all along. Plan 23 inverted both the
+   read and the write (`7f6e449`); `docs/OUTSTANDING.md`, item 6]*, and
+   twenty-two mutations were run — thirteen on the Rust and nine
    on `tools/test-sony-daemon.sh` — each caught in the end. Five of the
    thirteen escaped their first attempt and are the reason four tests exist
    that otherwise would not (the last two share one): a body the two names do
@@ -282,7 +292,10 @@ descending order of how much they mattered:
    frame's third byte is written as a literal `0x00` rather than echoed from
    the reading, because `Facts` keeps only whether the setting is on. Both
    captures carry `0x00` and the reference names no field there, so the corpus
-   cannot tell a constant from an echo.
+   cannot tell a constant from an echo. *[It does name one:
+   `GsSetParamBoolean` (T1:4323) declares the byte `GsSettingType settingType`,
+   BOOLEAN_TYPE = 0x00 (T1:951). The encoder now writes it by that name, and
+   the decoder refuses a setting of any other type.]*
 
 6. **The paired-device list, decoded and then shown.** MDR table 2 carries the
    headset's own list of the machines it is paired with; fixture 000077 held it
@@ -294,7 +307,8 @@ descending order of how much they mattered:
 
    **Executed**, against the capture: fixture 000077 decodes through the real
    decoder to the entries the document publishes, `mdr_payload.rs` pins the
-   corpus at 19 understood and 50 unhandled with the list among the understood,
+   corpus at 19 understood and 50 unhandled with the list among the understood
+   *[25 and 45 since plan 23]*,
    and `sony_contract.rs` holds the new key in the document's byte-for-byte
    shape. `tools/test-headphones-page.sh` asserts the page reads the field,
    gates on the capability, and draws nothing from the `detail` bytes; three

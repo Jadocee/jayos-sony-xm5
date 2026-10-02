@@ -200,6 +200,39 @@ else
     run stop >/dev/null
 fi
 
+# EVERY word after `start`, not only the first. These two used to start the
+# daemon with status 0: the second word was dropped, and an explicit empty
+# first word read as "no argument", so --alerts after it went nowhere.
+for words in "--alerts --verbose" "'' --alerts" "--alerts --alerts"; do
+    eval "set -- $words"
+    out=$(run start "$@")
+    status=$?
+    sleep 0.3
+    if [[ "$status" == "2" && "$out" == *"only --alerts"* ]] && ! alive; then
+        pass "start $words is refused with status 2 and starts nothing"
+    else
+        bad "start $words answered '$out' with status $status"
+        run stop >/dev/null
+        sleep 0.4
+    fi
+done
+
+# A daemon already running keeps what it was started with, and `start
+# --alerts` says so rather than implying alerts are now on.
+rm -f "$WORK/bin/argv"
+run start >/dev/null
+sleep 0.3
+out=$(run start --alerts)
+status=$?
+if [[ "$status" == "0" && "$out" == *"already running"* && "$out" == *"only to a daemon this starts"* \
+      && -z "$(tr -d '\n' < "$WORK/bin/argv" 2>/dev/null)" ]]; then
+    pass "start --alerts on a running daemon says it changes nothing"
+else
+    bad "start --alerts on a running daemon answered '$out' with status $status"
+fi
+run stop >/dev/null
+sleep 0.4
+
 echo
 echo "the pattern is the binary, not the word"
 

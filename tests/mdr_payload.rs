@@ -589,12 +589,14 @@ fn every_capture_decodes_to_something_rather_than_panicking() {
         }
     }
     assert_eq!(total, 70, "the whole corpus");
-    // Nineteen: two battery frames, one NC/ASM, two device-info strings, the
-    // equaliser, the volume, the codec, the two support-function tables, the
-    // two DSEE halves, the two Speak-to-Chat halves, the paired-device list --
-    // and the four general setting frames, two capability replies naming
+    // Twenty-five: two battery frames, one NC/ASM, two device-info strings,
+    // the equaliser, the volume, the codec, the two support-function tables,
+    // the two DSEE halves, the two Speak-to-Chat halves, the paired-device
+    // list, the four general setting frames -- two capability replies naming
     // SIDETONE_SETTING and MULTIPOINT_SETTING and two param replies saying
-    // whether each is on.
+    // whether each is on -- and the six plan 23 added: the play status
+    // (000065), the upscaling status (000097), and table 2's two voice
+    // guidance replies, safe-listening figure and pairing status.
     //
     // PINNED, so adding a decoder without a test to go with it fails here, and
     // so does deleting one. This number moved 14 -> 18 when the general
@@ -887,7 +889,8 @@ fn the_other_system_replies_are_left_alone() {
 #[test]
 fn the_same_bytes_on_the_other_table_are_not_the_same_message() {
     // The command byte does not say which table a frame is on, and the two
-    // enums disagree on 45 bytes. Five of them are bytes this port names.
+    // enums disagree on 45 bytes. Six of them are bytes this port names
+    // (`decode` lists them: 0x53, 0x57, 0x59, 0x61, 0x67, 0x69).
     //
     // These are the captured equaliser and NC/ASM payloads, unchanged, put on
     // a DATA_MDR_NO2 frame. On table 2 they are SAFE_LISTENING_RET_PARAM and
@@ -964,13 +967,9 @@ fn the_captured_keys_are_exactly_the_ones_the_corpus_decodes() {
         if f.payload.len() < 2 || payload::grounds(f.data_type, &f.payload).is_none() {
             continue;
         }
-        let wire = f.data_type.to_wire();
-        let command = if wire == 0x0C {
-            payload::Command::from_byte(f.payload[0]).canonical().to_byte()
-        } else {
-            f.payload[0]
-        };
-        decoded.insert((wire, command, f.payload[1]));
+        // The key `grounds` itself looks up, so the two cannot canonicalise
+        // differently.
+        decoded.insert(payload::key(f.data_type, &f.payload).expect("two bytes at least"));
     }
     let other: BTreeSet<payload::Key> = payload::OTHER_GROUNDS.iter().map(|(k, _, _)| *k).collect();
     let captured: BTreeSet<payload::Key> = payload::CAPTURED.iter().copied().collect();
@@ -1048,13 +1047,25 @@ fn each_nc_asm_layout_reads_its_own_offsets() {
     assert_eq!((n.mode, n.ambient_level), (NoiseMode::Anc, Some(12)));
     assert_eq!((n.adaptive, n.adaptive_sensitivity), (Some(true), Some(0x02)));
 
-    // 0x22, ambient only: no mode byte, so on means ambient.
+    // 0x22, ambient only: no mode byte, so on means ambient. The ambient
+    // mode and the level are given values that cannot stand in for each
+    // other -- VOICE (0x01) and 9 -- so reading either at the other's offset
+    // changes an answer. `NcAsmRetParamAsmSeamless` (T1:5289): ambient mode
+    // at frame byte 4, level at 5.
     let n = noise(&[0x67, 0x22, 0x01, 0x01, 0x00, 0x05]);
     assert_eq!((n.mode, n.mode_byte, n.ambient_level), (NoiseMode::Ambient, None, Some(5)));
+    let n = noise(&[0x67, 0x22, 0x01, 0x01, 0x01, 0x09]);
+    assert_eq!((n.focus_on_voice, n.ambient_level), (Some(true), Some(9)));
 
     // 0x13 at seven bytes: an NC switch where the others have a mode byte.
+    // `NcAsmRetParamNcOnOffAsmSeamless` (T1:5505): NC switch at frame byte 4,
+    // ambient mode at 5, level at 6 -- distinct values again.
     assert_eq!(noise(&[0x67, 0x13, 0x01, 0x01, 0x01, 0x00, 0x09]).mode, NoiseMode::Anc);
     assert_eq!(noise(&[0x67, 0x13, 0x01, 0x01, 0x00, 0x00, 0x09]).mode, NoiseMode::Ambient);
+    let n = noise(&[0x67, 0x13, 0x01, 0x01, 0x00, 0x01, 0x09]);
+    assert_eq!((n.mode, n.focus_on_voice, n.ambient_level), (NoiseMode::Ambient, Some(true), Some(9)));
+    let n = noise(&[0x67, 0x13, 0x01, 0x01, 0x00, 0x00, 0x01]);
+    assert_eq!((n.focus_on_voice, n.ambient_level), (Some(false), Some(1)));
 
     // 0x01 at five: cancelling or nothing, and no level to publish.
     let n = noise(&[0x67, 0x01, 0x01, 0x01, 0x01]);
@@ -1110,6 +1121,14 @@ fn the_connection_mode_is_read_at_both_of_its_types_and_no_other() {
     }
     assert_eq!(payload::grounds(MDR, &[0xE7, 0x02, 0x01]), Some(payload::Grounds::HeaderOnly));
     assert_eq!(payload::grounds(MDR, &[0xE7, 0x00, 0x01]), Some(payload::Grounds::ReferenceClient));
+    // Every connection struct pins `settingValue` to CONNECTION_QUALITY_PRIOR
+    // (T1:2807, 2820) and libmdr's validation drops anything else, so a
+    // reading of any other value stands on less than its key: against the
+    // header, at either type and volunteered or asked.
+    for bytes in [&[0xE7u8, 0x02, 0x00][..], &[0xE7, 0x00, 0x00], &[0xE9, 0x02, 0x00], &[0xE7, 0x02, 0x02]] {
+        assert_eq!(payload::grounds(MDR, bytes), Some(payload::Grounds::AgainstHeader), "{bytes:02x?}");
+    }
+    assert_eq!(payload::Grounds::AgainstHeader.as_str(), "against-header");
 
     // The LE Audio form (0x05) is four bytes with the unexplained `value2`,
     // and is not read; nor is a three-byte reply at any other type, nor the
@@ -1184,6 +1203,19 @@ fn table_two_voice_guidance_safe_listening_and_pairing_read_as_the_reference_cli
     assert!(matches!(payload::decode(T2, &[0x33, 0x02, 0x02, 0x00]), Reading::Unhandled { .. }));
     assert!(matches!(payload::decode(T2, &[0x33, 0x02, 0x01, 0x07]), Reading::Unhandled { .. }));
 
+    // A volunteered table-2 change stands where its reply does, as on table
+    // 1: PERI_NTFY_STATUS on PERI_RET_STATUS's grounds, and the corpus's
+    // paired-device list (000077, PERI_RET_PARAM, captured) sent as
+    // PERI_NTFY_PARAM on the same grounds as the reply that was captured.
+    assert_eq!(payload::grounds(T2, &[0x35, 0x02, 0x00, 0x00]), Some(payload::Grounds::ReferenceClient), "NTFY");
+    let list = payloads_for("PERI_RET_PARAM");
+    assert_eq!(list.len(), 1);
+    assert_eq!(payload::grounds(T2, &list[0]), Some(payload::Grounds::Captured));
+    let mut volunteered = list[0].clone();
+    volunteered[0] = 0x39;
+    assert!(matches!(payload::decode(T2, &volunteered), Reading::PairedDevices(_)));
+    assert_eq!(payload::grounds(T2, &volunteered), Some(payload::Grounds::Captured), "PERI_NTFY_PARAM");
+    assert_eq!(payload::key(T2, &volunteered), payload::key(T2, &list[0]));
     for bytes in [&[0x47u8, 0x01, 0x00, 0x01][..], &[0x47, 0x20, 0x00], &[0x5B, 0x03, 0xFF, 0x00], &[0x33, 0x02, 0x00, 0x00]] {
         assert_eq!(payload::grounds(T2, bytes), Some(payload::Grounds::ReferenceClient), "{bytes:02x?}");
         // TABLE ONE IS ANOTHER NAMESPACE: the same bytes there are not these.
@@ -1200,8 +1232,9 @@ fn table_two_voice_guidance_safe_listening_and_pairing_read_as_the_reference_cli
 #[test]
 fn an_alert_is_read_raw_and_named_from_the_header() {
     // PLAN 23, ITEM 14. `99 00 <AlertMessageType> <AlertActionType>`, at
-    // FIXED_MESSAGE only. No capture holds one; the recorder never enabled
-    // alerts.
+    // FIXED_MESSAGE only. No capture holds one: the headset asked nothing
+    // while the corpus was recorded (`decode_alert` has why that, and not
+    // alerts being off, is the likely reason).
     assert_eq!(payload::decode(MDR, &[0x99, 0x00, 0x07, 0x01]), Reading::Alert { message: 0x07, action: 0x01 });
     assert_eq!(payload::grounds(MDR, &[0x99, 0x00, 0x07, 0x01]), Some(payload::Grounds::ReferenceClient));
     // Another alert type, another length, or table 2: not this message.
@@ -1221,9 +1254,27 @@ fn an_alert_is_read_raw_and_named_from_the_header() {
     assert_eq!(payload::alert_action_word(0x01), "positive_negative");
     assert_eq!(payload::alert_action_word(0x07), "unknown");
 
-    // Which answers drop the link: every DISCONNECT_*, and the firmware one.
+    // Which answers drop the link: every name that says DISCONNECT or
+    // RECONNECTION anywhere in it, bar the one about the LE (GATT) link.
     assert!(payload::alert_disconnects(0x07));
     assert!(payload::alert_disconnects(0x02), "NEED_DISCONNECTION_FOR_UPDATING_FIRMWARE");
+    assert!(
+        payload::alert_disconnects(0x0B),
+        "CAUTION_FOR_DISABLE_TOUCH_SENSOR_PANEL_AND_RECONNECTION -- a WH-1000XM5's touch panel"
+    );
+    assert!(payload::alert_disconnects(0x19), "FOREGROUND_CAUTION_NEED_DISCONNECTION_FOR_ENABLING_WAKE_WORD");
+    assert!(!payload::alert_disconnects(0x1F), "CAUTION_FOR_GATT_DISCONNECTION_FOR_SAR is the LE link");
     assert!(!payload::alert_disconnects(0x08), "a battery caution is not a disconnect");
     assert!(!payload::alert_disconnects(0x04), "an undeclared byte promises nothing");
+    // THE WHOLE SET, over every byte, so the rule cannot drift by one name
+    // without this failing. Read off T1:98-207 by the rule above: 0x0B, 0x0D,
+    // 0x10, 0x11, 0x14, 0x15 end `..._AND_RECONNECTION...`; 0x19 says
+    // NEED_DISCONNECTION; the rest are DISCONNECT_* and NEED_DISCONNECTION_*.
+    let want: Vec<u8> = vec![
+        0x00, 0x01, 0x02, 0x06, 0x07, 0x0B, 0x0D, 0x10, 0x11, 0x14, 0x15, 0x19, 0x24, 0x25, 0x26, 0x27, 0x28,
+        0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x40, 0x41, 0x56, 0x57, 0x58,
+        0x74, 0x75, 0x76, 0x77,
+    ];
+    let got: Vec<u8> = (0u8..=255).filter(|b| payload::alert_disconnects(*b)).collect();
+    assert_eq!(got, want);
 }

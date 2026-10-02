@@ -761,18 +761,21 @@ fn the_connection_mode_is_written_in_the_form_the_headset_answered_in() {
         ));
     }
 
-    // Answered at 0x02: `e8 02 <PriorMode>`, HEADER ONLY -- the strongest
-    // kind, a pinned and field-identical RET/SET/NTFY triple -- and the SET
-    // with byte 0 swapped back to the RET decodes to what was asked for.
+    // Answered at 0x02: `e8 02 <PriorMode>`, from a pinned and
+    // field-identical RET/SET/NTFY triple -- and the SET with byte 0 swapped
+    // back to the RET decodes to what was asked for. The triple pins the
+    // VALUE as well, to CONNECTION_QUALITY_PRIOR (T1:2643, 2820, 3090), and
+    // libmdr's generated validation enforces it: `stable` is HEADER ONLY and
+    // `quality` is AGAINST THE HEADER, the one tier weaker.
     let mut ldac = only_table_one(&[0xE3]);
     ldac.observe(DataType::DataMdr, &[0xE7, 0x02, 0x00]);
-    for (word, byte, prior) in [
-        ("quality", 0x00u8, payload::PriorMode::SoundQuality),
-        ("stable", 0x01, payload::PriorMode::ConnectionQuality),
+    for (word, byte, prior, tier) in [
+        ("quality", 0x00u8, payload::PriorMode::SoundQuality, "against-header"),
+        ("stable", 0x01, payload::PriorMode::ConnectionQuality, "header-only"),
     ] {
         let out = encode::encode(&ldac, &Verb::ConnectionPriority(word.into())).expect("a frame");
         assert_eq!(out.payload, vec![0xE8, 0x02, byte], "{word}");
-        assert_eq!(out.evidence.tier(), "header-only");
+        assert_eq!(out.evidence.tier(), tier, "{word}");
         assert_eq!(out.evidence.set(), "AudioSetParamConnectionWithLdacStatus");
         assert_eq!(out.ret_twin(), Some(0xE7));
         let mut back = out.payload.clone();
@@ -789,6 +792,10 @@ fn the_connection_mode_is_written_in_the_form_the_headset_answered_in() {
     assert_eq!(out.payload, vec![0xE8, 0x00, 0x01]);
     assert!(matches!(out.evidence, Evidence::ThirdParty { set: "AudioSetParamConnection", .. }));
     assert!(out.evidence.tier() == "third-party");
+    // And `quality` there is outside the same pin (T1:3062).
+    let out = encode::encode(&plain, &Verb::ConnectionPriority("quality".into())).expect("a frame");
+    assert_eq!(out.payload, vec![0xE8, 0x00, 0x00]);
+    assert!(matches!(out.evidence, Evidence::AgainstHeader { set: "AudioSetParamConnection", .. }));
 
     // A headset with only the LE Audio form keeps the old refusal by name --
     // the captured WF-1000XM5 is one, and `the_captured_device_gates_the_verbs
@@ -1126,8 +1133,9 @@ fn only_table_two(codes: &[u8]) -> Facts {
 
 #[test]
 fn table_two_is_asked_what_its_own_functions_name() {
-    // PLAN 23, ITEM 11. Nothing was ever asked on table 2 before; the corpus's
-    // table-2 replies answered the recording app.
+    // PLAN 23, ITEM 11. No table-2 feature was ever asked about before --
+    // only the support list was -- and the corpus's table-2 replies answered
+    // the recording app.
     let asked = |facts: &Facts| -> Vec<(DataType, Vec<u8>)> {
         encode::feature_gets(facts)
             .into_iter()
@@ -1157,6 +1165,13 @@ fn table_two_is_asked_what_its_own_functions_name() {
     for (functions, kind) in [(&[0x53u8, 0x51][..], 0x01u8), (&[0x53, 0x52], 0x02), (&[0x53], 0x03)] {
         let sl: Vec<_> = asked(&only_table_two(functions)).into_iter().filter(|(_, p)| p[0] == 0x5A).collect();
         assert_eq!(sl, vec![no2(&[0x5A, kind])], "{functions:02x?}");
+    }
+
+    // Each voice-guidance form at its own `VoiceGuidanceInquiredType`
+    // (T2:606-618), one function at a time, so no two can trade types.
+    for (function, kind) in [(0x40u8, 0x00u8), (0x41, 0x01), (0x42, 0x01), (0x44, 0x02), (0x45, 0x03)] {
+        let vg: Vec<_> = asked(&only_table_two(&[function])).into_iter().filter(|(_, p)| p == &[0x46, kind]).collect();
+        assert_eq!(vg, vec![no2(&[0x46, kind])], "t2 0x{function:02x}");
     }
 
     // TABLE 2 IS ITS OWN NAMESPACE. The same codes on table 1 earn nothing

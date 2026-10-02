@@ -1461,8 +1461,9 @@ fn every_frame_a_command_becomes_is_logged_with_its_evidence() {
 fn an_over_ear_headset_publishes_one_battery_from_either_header_form() {
     // PLAN 23, ITEM 1, the publishing half, end to end through the session.
     // HEADER ONLY -- no capture in the corpus is a WH -- with the layouts
-    // corroborated by libmdr's decoder and Gadgetbridge's (level at offset 2,
-    // charging at offset 3). The decode itself is pinned in mdr_payload.rs;
+    // corroborated by libmdr's decoder (level at offset 2, charging at offset
+    // 3) for both, and by Gadgetbridge's for 0x00 alone: its
+    // `decodeBatteryType` has no 0x08. The decode itself is pinned in mdr_payload.rs;
     // what this pins is that the reading reaches `battery.main` and only
     // there, that the support table makes it a single-battery headset, and
     // that a volunteered change (POWER_NTFY_STATUS, 0x25) moves it.
@@ -1610,17 +1611,27 @@ fn alerts_are_off_unless_asked_for_and_an_answer_jumps_the_queue() {
     let mut session = fresh().with_alerts(true);
     let out = replay(&mut session, usize::MAX);
     let mut now = 20_000;
-    let mut all = out.clone();
-    // The enable rides behind the feature queries; drain them to see it.
-    for _ in 0..64 {
-        let step = session.step(Input::Tick { now });
-        all.extend(step.iter().cloned());
-        acknowledge_all(&mut session, step, &mut now);
-        if enabled(&all) {
+    // THE ENABLE GOES LAST, behind every feature query, and this is this
+    // port's order rather than libmdr's: libmdr sends it in the middle of
+    // its init, before its codec, playback and NC/ASM GETs
+    // (`HeadphonesV2.cpp:88-90`); `Session::pump` queues it after the batch.
+    // Every data frame is acknowledged as it goes out and recorded in wire
+    // order -- the replay's own run first, whose script ACKs some of them.
+    let mut order: Vec<Vec<u8>> =
+        sent(&out).iter().filter_map(|w| frame::unpack(w).ok()).filter(|f| f.data_type.is_data()).map(|f| f.payload).collect();
+    let mut pending = session.step(Input::Tick { now });
+    for _ in 0..200 {
+        let Some(f) = sent(&pending).iter().filter_map(|w| frame::unpack(w).ok()).find(|f| f.data_type.is_data())
+        else {
             break;
-        }
+        };
+        order.push(f.payload.clone());
+        now += 1;
+        pending = session.step(Input::Bytes { now, bytes: &frame::ack_frame(f.seq) });
     }
-    assert!(enabled(&all), "--alerts did not ask the headset for its alerts");
+    let at = order.iter().position(|p| p == &[0x94, 0x00, 0x00]).expect("--alerts did not ask the headset for its alerts");
+    assert_eq!(at, order.len() - 1, "the enable went out before a feature query: {order:02x?}");
+    assert!(order.len() > 10, "too few feature queries to show an order: {order:02x?}");
 
     // A question: DISCONNECT_CAUSED_BY_CHANGING_MULTIPOINT, yes or no.
     let mut seq = 0u8;
@@ -1652,12 +1663,32 @@ fn alerts_are_off_unless_asked_for_and_an_answer_jumps_the_queue() {
         !out.iter().any(|e| matches!(e, Effect::Reply { id: ClientId(7), line } if line.starts_with("error"))),
         "the answer was refused: {out:?}"
     );
+    // Logged like every other write, with what it stands on: the header alone.
+    assert!(
+        notes(&out).iter().any(|n| matches!(n, Note::Sent { command: 0x98, kind: 0x00, tier: "header-only", .. })),
+        "{out:?}"
+    );
     let v: serde_json::Value = serde_json::from_str(&session.document()).expect("json");
     assert_eq!(v["alert"], serde_json::Value::Null, "the question is still shown after it was answered");
+
+    // A SECOND ANSWER ON THE SAME LINK is refused: answering cleared the
+    // question the encoder reads, not only the one the document shows. On
+    // THIS session, before the drop -- a fresh one has never been asked
+    // anything and would refuse whether or not the first answer cleared it.
+    let again = session.step(Input::Command { now: now + 35, id: ClientId(8), line: "alert yes" });
+    assert!(
+        again.iter().any(|e| matches!(e, Effect::Reply { id: ClientId(8), line } if line.contains("not asking"))),
+        "a second answer was taken: {again:?}"
+    );
+    assert!(!notes(&again).iter().any(|n| matches!(n, Note::Sent { .. })), "{again:?}");
+
     // Every data frame from here on, in wire order: the one already in flight
-    // when the answer was given, then whatever the engine sends next.
+    // when the answer was given, then whatever the engine sends next. The
+    // client that answered is told `ok` when the headset acknowledges the
+    // answer, as for any other write.
     let mut order: Vec<Vec<u8>> = Vec::new();
-    let mut pending: Vec<Effect> = before.into_iter().chain(out).collect();
+    let mut told: Option<usize> = None;
+    let mut pending: Vec<Effect> = before.into_iter().chain(out).chain(again).collect();
     let mut t = now + 40;
     for _ in 0..200 {
         let Some(f) = sent(&pending).iter().filter_map(|w| frame::unpack(w).ok()).find(|f| f.data_type.is_data())
@@ -1666,12 +1697,17 @@ fn alerts_are_off_unless_asked_for_and_an_answer_jumps_the_queue() {
         };
         order.push(f.payload.clone());
         pending = session.step(Input::Bytes { now: t, bytes: &frame::ack_frame(f.seq) });
+        if pending.iter().any(|e| matches!(e, Effect::Reply { id: ClientId(7), line } if line == "ok")) {
+            told = Some(order.len() - 1);
+        }
         t += 1;
     }
     let position = order.iter().position(|p| p.first() == Some(&0x98)).expect("the answer never reached the wire");
     assert_eq!(order[position], vec![0x98, 0x00, 0x07, 0x01]);
     assert_eq!(position, 1, "the answer waited behind {} frames: {order:02x?}", position);
     assert!(order.len() > 2, "nothing was queued behind it, so the test proved nothing: {order:02x?}");
+    assert_eq!(order.iter().filter(|p| p.first() == Some(&0x98)).count(), 1, "{order:02x?}");
+    assert_eq!(told, Some(position), "the client that answered was not told ok when the answer was acknowledged");
 
     // The headset then drops the link, as its question said it would: that
     // is a clean close, not an error.
@@ -1680,11 +1716,185 @@ fn alerts_are_off_unless_asked_for_and_an_answer_jumps_the_queue() {
     assert_eq!(v["phase"], "idle", "{v}");
     assert_eq!(v["last_error"], "");
 
-    // And a second answer, with nothing asked, is refused.
+    // And an answer on a link where nothing was ever asked is refused too.
     let mut session = ready_session();
     let out = session.step(Input::Command { now: 9_000, id: ClientId(8), line: "alert no" });
     assert!(
         out.iter().any(|e| matches!(e, Effect::Reply { line, .. } if line.contains("not asking"))),
         "{out:?}"
     );
+}
+
+/// The corpus heard and every frame this session sent acknowledged, so the
+/// next command goes straight onto the wire. Returns the clock.
+fn quiet_session() -> (Session, u64) {
+    let mut session = fresh();
+    let mut now = 1u64;
+    let up = session.step(Input::LinkUp { now: 0, peer: peer() });
+    acknowledge_all(&mut session, up, &mut now);
+    for wire in script() {
+        let out = session.step(Input::Bytes { now, bytes: &wire });
+        now += 1;
+        acknowledge_all(&mut session, out, &mut now);
+    }
+    assert_eq!(session.deadline(), None, "something was left unacknowledged");
+    (session, now)
+}
+
+#[test]
+fn a_yes_to_a_disconnecting_alert_excuses_one_drop_and_only_briefly() {
+    // PLAN 23, ITEM 14. The drop a yes promises is a clean close -- but only
+    // the drop it promised: a yes that goes nowhere, a no, an alert that
+    // promises nothing, a drop long after, a new link in between, and the
+    // engine's own hang-up are each what the transport or the engine says
+    // they are. The header does not say WHICH link a DISCONNECT_* message
+    // drops, so "after a yes" cannot mean "whenever".
+    let window = Limits::default().drop_window;
+    let phase = |session: &Session| -> (String, String) {
+        let v: serde_json::Value = serde_json::from_str(&session.document()).expect("json");
+        (v["phase"].as_str().unwrap_or_default().to_string(), v["last_error"].as_str().unwrap_or_default().to_string())
+    };
+    // Asked `message`, answered `line`; returns the moment the answer was
+    // acknowledged, or `None` when `ack` says to leave it unacknowledged.
+    let asked_and_answered = |message: u8, line: &str, ack: bool| -> (Session, u64) {
+        let (mut session, mut now) = quiet_session();
+        session.step(Input::Bytes { now, bytes: &frame::pack(DataType::DataMdr, 0, &[0x99, 0x00, message, 0x01]) });
+        now += 1;
+        let out = session.step(Input::Command { now, id: ClientId(1), line });
+        now += 1;
+        let answer = sent(&out).into_iter().filter_map(|w| frame::unpack(&w).ok()).find(|f| f.data_type.is_data());
+        let answer = answer.expect("the answer went straight out");
+        assert_eq!(answer.payload[0], 0x98, "{line}");
+        if ack {
+            session.step(Input::Bytes { now, bytes: &frame::ack_frame(answer.seq) });
+        }
+        (session, now)
+    };
+    let failed = Down::Failed("the connection to the headset failed");
+
+    // The promised drop, at the last moment of the window: clean.
+    let (mut s, acked) = asked_and_answered(0x07, "alert yes", true);
+    s.step(Input::LinkDown { now: acked + window, why: failed });
+    assert_eq!(phase(&s), ("idle".to_string(), String::new()), "the drop the yes promised");
+
+    // One millisecond later it is a failure like any other.
+    let (mut s, acked) = asked_and_answered(0x07, "alert yes", true);
+    s.step(Input::LinkDown { now: acked + window + 1, why: failed });
+    assert_eq!(phase(&s), ("error".to_string(), "the connection to the headset failed".to_string()), "late");
+
+    // An hour later -- the reviewer's case: the yes dropped the other phone.
+    let (mut s, acked) = asked_and_answered(0x07, "alert yes", true);
+    s.step(Input::LinkDown { now: acked + 3_600_000, why: failed });
+    assert_eq!(phase(&s).0, "error", "an hour-old yes excused a failure");
+
+    // A headset that drops the link as it takes the answer may never ACK it.
+    let (mut s, now) = asked_and_answered(0x07, "alert yes", false);
+    s.step(Input::LinkDown { now, why: failed });
+    assert_eq!(phase(&s).0, "idle", "a drop with the answer on the wire");
+
+    // A no promises nothing.
+    let (mut s, acked) = asked_and_answered(0x07, "alert no", true);
+    s.step(Input::LinkDown { now: acked, why: failed });
+    assert_eq!(phase(&s).0, "error", "a no excused a failure");
+
+    // Nor does a yes to a message that does not disconnect.
+    let (mut s, acked) = asked_and_answered(0x08, "alert yes", true);
+    s.step(Input::LinkDown { now: acked, why: failed });
+    assert_eq!(phase(&s).0, "error", "a yes to a battery caution excused a failure");
+
+    // A new link in between, reported without a LinkDown first.
+    let (mut s, acked) = asked_and_answered(0x07, "alert yes", true);
+    s.step(Input::LinkUp { now: acked, peer: peer() });
+    s.step(Input::LinkDown { now: acked + 1, why: failed });
+    assert_eq!(phase(&s).0, "error", "a yes on the last link excused this one's failure");
+
+    // The engine's own hang-up keeps its reason: the headset went quiet and
+    // kept the link, which is not what it said it would do.
+    let (mut s, mut now) = asked_and_answered(0x07, "alert yes", false);
+    let mut hung_up = false;
+    for _ in 0..8 {
+        now += Limits::default().ack_wait;
+        if s.step(Input::Tick { now }).contains(&Effect::Hangup) {
+            hung_up = true;
+            break;
+        }
+    }
+    assert!(hung_up, "the engine never gave up on the unacknowledged answer");
+    s.step(Input::LinkDown { now: now + 1, why: Down::HungUp });
+    assert_eq!(phase(&s), ("error".to_string(), "this headset stopped acknowledging".to_string()));
+
+    // And a yes still queued behind another frame has not reached the
+    // headset, so a drop then is not it keeping its word.
+    let (mut s, mut now) = quiet_session();
+    s.step(Input::Bytes { now, bytes: &frame::pack(DataType::DataMdr, 0, &[0x99, 0x00, 0x07, 0x01]) });
+    now += 1;
+    let busy = s.step(Input::Command { now, id: ClientId(2), line: "refresh" });
+    assert!(sent(&busy).iter().any(|w| frame::unpack(w).is_ok_and(|f| f.data_type.is_data())), "nothing in flight");
+    s.step(Input::Command { now: now + 1, id: ClientId(1), line: "alert yes" });
+    s.step(Input::LinkDown { now: now + 2, why: failed });
+    assert_eq!(phase(&s).0, "error", "a yes the headset never heard excused a failure");
+}
+
+#[test]
+fn the_published_range_is_the_one_in_force() {
+    // PLAN 23, ITEM 2. The grammar takes 1..=20 whatever the headset says,
+    // and the encoder takes what the headset says, so the document publishes
+    // the levels BOTH take -- and every one of them is sent here and must be
+    // accepted, while every level outside it must be refused.
+    let check = |stated: &[u8], want: serde_json::Value| {
+        // Quiet, and every accepted write acknowledged, so no level is
+        // refused for want of room in the outbox.
+        let (mut session, mut now) = quiet_session();
+        let mut payload = vec![0x61, 0x17, 0x01, 0x00];
+        payload.extend_from_slice(stated);
+        session.step(Input::Bytes { now, bytes: &frame::pack(DataType::DataMdr, 0, &payload) });
+        now += 1;
+        let v: serde_json::Value = serde_json::from_str(&session.document()).expect("json");
+        assert_eq!(v["ambient_range"], want, "stated {stated:?}");
+        let (min, max, step) =
+            (want["min"].as_i64().unwrap_or(0), want["max"].as_i64().unwrap_or(0), want["step"].as_i64().unwrap_or(0));
+        for level in -1..=40i64 {
+            let offered = step > 0 && (min..=max).contains(&level) && (level - min) % step == 0;
+            let line = format!("ambient-level {level}");
+            let out = session.step(Input::Command { now, id: ClientId(3), line: &line });
+            now += 1;
+            let refused =
+                out.iter().any(|e| matches!(e, Effect::Reply { id: ClientId(3), line } if line.starts_with("error")));
+            assert_eq!(!refused, offered, "stated {stated:?}, {line}: {out:?}");
+            acknowledge_all(&mut session, out, &mut now);
+        }
+    };
+    // Wider than the grammar both ways: cut to it.
+    check(&[0x00, 0x20, 0x01], serde_json::json!({"min":1,"max":20,"step":1,"source":"device"}));
+    // On steps of two from zero: the first step inside is 2.
+    check(&[0x00, 0x20, 0x02], serde_json::json!({"min":2,"max":20,"step":2,"source":"device"}));
+    // Narrower: as stated.
+    check(&[0x02, 0x0A, 0x02], serde_json::json!({"min":2,"max":10,"step":2,"source":"device"}));
+    // Sharing no level with 1..=20: nothing is offered and nothing is taken.
+    check(&[0x15, 0x20, 0x01], serde_json::json!({"min":0,"max":0,"step":0,"source":"device"}));
+}
+
+#[test]
+fn the_noise_adaptation_reading_reaches_the_document() {
+    // PLAN 23, ITEM 3, the 0x19 layout end to end: the adaptive switch at
+    // offset 7 and NoiseAdaptiveSensitivity at 8 (T1:1203-1209: STANDARD
+    // 0x00, HIGH 0x01, LOW 0x02). Synthetic: no capture holds a 0x19 reply.
+    let doc = |payload: &[u8]| -> serde_json::Value {
+        let mut session = fresh();
+        session.step(Input::LinkUp { now: 0, peer: peer() });
+        session.step(Input::Bytes { now: 1, bytes: &frame::pack(DataType::DataMdr, 0, payload) });
+        serde_json::from_str(&session.document()).expect("json")
+    };
+    let v = doc(&[0x67, 0x19, 0x01, 0x01, 0x00, 0x00, 0x0C, 0x01, 0x02]);
+    assert_eq!(v["noise"]["mode"], "anc");
+    assert_eq!(v["noise"]["ambient_level"], 12);
+    assert_eq!(v["noise"]["adaptive"], true);
+    assert_eq!(v["noise"]["adaptive_sensitivity"], "low");
+    let v = doc(&[0x67, 0x19, 0x01, 0x01, 0x00, 0x00, 0x0C, 0x00, 0x01]);
+    assert_eq!(v["noise"]["adaptive"], false);
+    assert_eq!(v["noise"]["adaptive_sensitivity"], "high");
+    let v = doc(&[0x67, 0x19, 0x01, 0x01, 0x00, 0x00, 0x0C, 0x00, 0x00]);
+    assert_eq!(v["noise"]["adaptive_sensitivity"], "standard");
+    let v = doc(&[0x67, 0x19, 0x01, 0x01, 0x00, 0x00, 0x0C, 0x00, 0x07]);
+    assert_eq!(v["noise"]["adaptive_sensitivity"], "unknown");
 }

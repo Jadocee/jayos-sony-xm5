@@ -5,6 +5,7 @@
 #   sony-daemon-process start     start it unless it is already running
 #   sony-daemon-process start --alerts
 #                                 the same, with the headset's confirmations on
+#                                 (a daemon already running is left as it was)
 #   sony-daemon-process stop      stop it, and remove the document it left
 #   sony-daemon-process running   exit 0 if it is running, 1 if not
 #   sony-daemon-process --json    {installed, running, log}, for a settings page
@@ -71,17 +72,32 @@ running() { pgrep -u "$(id -u)" -f -- "$PATTERN" >/dev/null 2>&1; }
 
 # --alerts is passed through to the daemon and is the only argument start
 # takes. Alerts are a capture-session switch (qs-sonyd's encode::alerts_on
-# says why they are off by default), so an unknown word here is refused rather
-# than handed to the daemon to refuse after it has detached.
+# says why they are off by default), so anything else is refused here, before
+# the daemon detaches -- after that its own refusal (exit 2) goes to a log
+# nobody is reading. "Anything else" is every word after `start`, not only the
+# first: `start --alerts --verbose` used to drop the second word, and
+# `start "" --alerts` started without alerts, both with status 0. An empty
+# word given explicitly is a word, and is refused like any other.
 start_it() {
     local extra=()
-    case "${1:-}" in
-        "") ;;
-        --alerts) extra=(--alerts) ;;
-        *) echo "start takes only --alerts, not $1" >&2; return 2 ;;
-    esac
+    if (( $# > 1 )); then
+        echo "start takes only --alerts, not: $*" >&2
+        return 2
+    fi
+    if (( $# == 1 )); then
+        case "$1" in
+            --alerts) extra=(--alerts) ;;
+            *) echo "start takes only --alerts, not '$1'" >&2; return 2 ;;
+        esac
+    fi
     installed || { echo "no daemon at $DAEMON" >&2; return 1; }
-    running && { echo "already running"; return 0; }
+    if running; then
+        echo "already running"
+        # Flags reach a daemon only as it starts, and this one is not being
+        # started: one already running keeps whatever it was started with.
+        (( ${#extra[@]} )) && echo "--alerts applies only to a daemon this starts; stop it first" >&2
+        return 0
+    fi
     mkdir -p "$LOG_DIR" 2>/dev/null || { echo "cannot create $LOG_DIR" >&2; return 1; }
     # One previous run is kept: the daemon is started at login, and a crash
     # there must not have its notes overwritten by the restart that follows.
@@ -110,7 +126,8 @@ stop_it() {
 
 case "${1:-}" in
     start)
-        start_it "${2:-}"
+        shift
+        start_it "$@"
         ;;
     stop)
         stop_it

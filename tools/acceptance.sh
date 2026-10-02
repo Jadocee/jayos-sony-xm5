@@ -5,11 +5,11 @@
 #   tools/acceptance.sh [--out=DIR]      run it, against a connected WH-1000XM5
 #   tools/acceptance.sh --dry-run        say every step, run none of them
 #
-# Exit 0: every item a capture can settle is settled. 1: some are still open --
-# `qs-sony settle` lists which. 2: could not run -- a tool is missing, no
-# WH-1000XM5 is connected, or nothing was captured -- which is not the same
-# answer as either and is not reported as one. --dry-run exits 0 having run
-# nothing.
+# Exit 0: every item a capture can settle is settled. 1: some are still open,
+# or contradicted -- `qs-sony settle` lists which. 2: could not run -- a tool is
+# missing, no WH-1000XM5 is connected, or nothing was captured -- which is not
+# the same answer as either and is not reported as one. --dry-run exits 0
+# having run nothing.
 #
 # WHY A SCRIPT. The session is a dozen steps in a fixed order -- the trace must
 # be running before the daemon dials, the alert must be answered before the
@@ -78,6 +78,10 @@ fi
 say "1. trace the link from before the daemon dials (items 1-7, 10, 11)"
 printf '  in another terminal, as root:\n  $ btmon -w %s\n' "$TRACE"
 ask "start btmon as above"
+# Item 6 is the polarity of the general settings, and the one frame that tells
+# the two readings apart is the multipoint slot read while TWO peers are
+# connected: the paired-device list the daemon asks at link-up then shows both.
+ask "with multipoint on, connect a second device (a phone) to the headset as well (item 6)"
 
 say "2. the daemon, recording, with alerts on (items 6, 14)"
 # Off first: the shell's daemon would hold the socket and the headset's one
@@ -101,7 +105,7 @@ for verb in "noise anc" "noise ambient" "ambient-level 10" "focus-on-voice on" "
     run "$QS_SONY" send $verb
 done
 
-say "4. a general-setting write, its alert, and the answer (items 6, 14)"
+say "4. a general-setting write, its alert, and the answer (item 14)"
 run "$QS_SONY" send general multipoint off
 ask "if the headset asked (qs-sony status shows .alert), answer it: qs-sony send alert yes"
 run "$QS_SONY" status

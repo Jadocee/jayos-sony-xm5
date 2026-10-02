@@ -34,8 +34,10 @@ fn corpus_document() -> String {
 /// The corpus again, then ONE SYNTHETIC FRAME: `99 00 07 01`, the headset
 /// asking DISCONNECT_CAUSED_BY_CHANGING_MULTIPOINT as a yes/no question.
 ///
-/// Synthetic because no capture holds an alert -- the recording app never
-/// enabled them -- and here because `alert` is the one key whose children
+/// Synthetic because no capture holds an alert -- the headset asked nothing
+/// while the corpus was recorded (`payload::decode_alert` says why that, and
+/// not alerts being off, is the likely reason) -- and here because `alert` is
+/// the one key whose children
 /// exist only while a question is pending. Without a document that carries
 /// them, keys.txt could not list `alert.message_type`, and jayos's page could
 /// not read a field the contract does not promise. The bytes are the

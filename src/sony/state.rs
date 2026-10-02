@@ -513,8 +513,11 @@ pub struct State {
     /// own address would be redundant in a list of peers and is not sent.
     pub paired_devices: Vec<PairedDevice>,
     /// The ambient level's legal values in the ambient mode the headset is
-    /// in: what it stated in its NCASM_RET_CAPABILITY reply, or the
-    /// compatibility range 1..=20 when it has stated none. Plan 23, item 2.
+    /// in: what it stated in its NCASM_RET_CAPABILITY reply, cut to the
+    /// command language's 1..=20, or that 1..=20 when it has stated none --
+    /// every level this offers is one the daemon accepts. Step 0 means the
+    /// stated range shares no level with 1..=20. Plan 23, item 2;
+    /// `Session::refresh_ambient_range` has the long form.
     ///
     /// TOP LEVEL AND NOT INSIDE `noise`, because `noise` is the C++ daemon's
     /// object and this daemon's additions are kept apart from the
@@ -535,9 +538,15 @@ pub struct State {
     pub safe_listening: SafeListening,
     /// Whether the headset is discoverable for pairing, from table 2.
     pub pairing_mode: Option<bool>,
-    /// The question the headset is waiting on, or `None`. Plan 23, item 14:
-    /// only ever set when `qs-sonyd --alerts` enabled them, and cleared the
-    /// moment a page answers with `alert yes|no`.
+    /// The question the headset is waiting on, or `None`. Plan 23, item 14.
+    ///
+    /// Set whenever the headset sends ALERT_NTFY_PARAM at FIXED_MESSAGE,
+    /// which it does once `94 00 00` has enabled them -- what `qs-sonyd
+    /// --alerts` sends. The read is NOT gated on that flag: a headset asking
+    /// is waiting for an answer however its alerts came to be on, and
+    /// `replay::document`, which has no flag at all, publishes one
+    /// (`contract/state.alert.example.json`). Cleared the moment the question
+    /// is answered with `alert yes|no`.
     pub alert: Option<Alert>,
     /// The last thing that went wrong, or empty. A page shows this instead of
     /// looking broken when there is nothing to show.
@@ -555,8 +564,11 @@ pub struct Alert {
     /// `confirmation_only`, `positive_negative`,
     /// `positive_confirmation_with_reply` or `unknown`.
     pub action_type: String,
-    /// Whether a yes makes the headset drop the link: every `DISCONNECT_*`
-    /// message. A page says so before the person answers.
+    /// Whether a yes makes the headset drop the link, by the message's name:
+    /// see `mdr::payload::alert_disconnects` for which names say so. A page
+    /// says so before the person answers. The header does not say WHICH link
+    /// drops -- a multipoint change may drop the other phone -- so this is a
+    /// warning, not a promise about this daemon's link.
     pub disconnects: bool,
 }
 

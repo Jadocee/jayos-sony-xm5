@@ -12,8 +12,8 @@
 //! does it to produce `contract/state.example.json`.
 //!
 //! DETERMINISTIC, BECAUSE IT IS COMPARED BYTE FOR BYTE. The frames are taken
-//! in file-name order -- the recorder's counter is zero-padded, so that is
-//! capture order -- and the clock is a counter rather than the wall: one
+//! in the order of the counter in their names, which is capture order
+//! (`capture::capture_order`), and the clock is a counter rather than the wall: one
 //! millisecond per frame. Nothing in a replayed document may depend on when
 //! it was replayed, or the contract check fails for reasons that are not a
 //! change.
@@ -39,7 +39,9 @@ pub fn received_frames(dir: &Path) -> io::Result<Vec<Vec<u8>>> {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.ends_with(".bin") && n.contains("-rx."))
         .collect();
-    names.sort();
+    // By counter, not by name: the name leads with a wall-clock time, which
+    // a recording can see step backwards. `capture::fixture_name` says more.
+    crate::capture::capture_order(&mut names);
     names.iter().map(|n| std::fs::read(dir.join(n))).collect()
 }
 

@@ -40,6 +40,11 @@ use std::collections::VecDeque;
 /// tells gives the same run and a test needs no clock.
 pub type Millis = u64;
 
+/// `ALERT_SET_PARAM` (T1:473): the frame an `alert yes|no` becomes,
+/// recognised on its way out so the drop a yes promises is timed from the
+/// moment the headset has it.
+const ALERT_SET_PARAM: u8 = 0x98;
+
 /// Which client asked, so a reply can be routed back to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClientId(pub u64);
@@ -169,12 +174,36 @@ pub struct Limits {
     pub outbox: usize,
     /// Undecodable frames on one link before it is abandoned as unsynchronised.
     pub bad_frames: u32,
+    /// How long after the headset acknowledges a yes to a disconnecting alert
+    /// a drop of this link still counts as the headset doing what it said.
+    ///
+    /// THIS PORT'S NUMBER, NOT THE REFERENCE'S: the header names the alerts
+    /// that disconnect and says nothing about when, and no capture holds one.
+    /// It has to be finite because the header does not say WHICH link a
+    /// `DISCONNECT_*` message drops either -- `DISCONNECT_CAUSED_BY_CHANGING_
+    /// MULTIPOINT` may well drop the other phone -- and an expectation with no
+    /// end turned a transport failure an hour later into a clean close.
+    pub drop_window: Millis,
 }
 
 impl Default for Limits {
     fn default() -> Limits {
-        Limits { ack_wait: 1_500, retries: 2, outbox: 64, bad_frames: 32 }
+        Limits { ack_wait: 1_500, retries: 2, outbox: 64, bad_frames: 32, drop_window: 5_000 }
     }
+}
+
+/// Where a yes to a disconnecting alert is on its way to the headset. See
+/// [`Session::link_down`] for what each stage makes of a drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpectDrop {
+    /// Queued behind the frame in flight: the headset has not heard it, so a
+    /// drop now is not the headset keeping its word.
+    Queued,
+    /// On the wire and not yet acknowledged. A headset that drops the link
+    /// as it takes the answer may never send the ACK.
+    Sent,
+    /// Acknowledged; a drop up to this moment is the one the alert promised.
+    Until(Millis),
 }
 
 /// The document's `phase`, as its four strings.
@@ -267,10 +296,12 @@ pub struct Session {
     /// Off by default -- see [`encode::alerts_on`] for why that is the
     /// person's decision.
     alerts: bool,
-    /// A yes was just given to an alert whose message says the headset will
-    /// drop the link. The drop that follows is the headset doing what it was
-    /// told, and is published as a clean close rather than as an error.
-    expect_drop: bool,
+    /// A yes was given to an alert whose message says the headset will drop
+    /// the link. A drop while the answer is on the wire, or within
+    /// [`Limits::drop_window`] of its acknowledgement, is the headset doing
+    /// what it was told and is published as a clean close; one after that is
+    /// whatever the transport says it was.
+    expect_drop: Option<ExpectDrop>,
 }
 
 impl Session {
@@ -296,7 +327,7 @@ impl Session {
             asked_feature_gets: false,
             hanging_up: false,
             alerts: false,
-            expect_drop: false,
+            expect_drop: None,
         }
     }
 
@@ -305,6 +336,13 @@ impl Session {
     pub fn with_alerts(mut self, on: bool) -> Session {
         self.alerts = on;
         self
+    }
+
+    /// Whether this session will ask for the headset's alerts -- what
+    /// `qs-sonyd` says in its log at start, read back from the session so the
+    /// line cannot say one thing while the session does another.
+    pub fn alerts(&self) -> bool {
+        self.alerts
     }
 
     /// The document as it now stands: `state::serialize`'s output, unchanged,
@@ -380,7 +418,7 @@ impl Session {
         self.want_feature_gets = false;
         self.asked_feature_gets = false;
         self.hanging_up = false;
-        self.expect_drop = false;
+        self.expect_drop = None;
         self.tx_seq = 0;
 
         self.state.device.name = peer.name;
@@ -393,7 +431,7 @@ impl Session {
         }
     }
 
-    fn link_down(&mut self, _now: Millis, why: Down, out: &mut Vec<Effect>) {
+    fn link_down(&mut self, now: Millis, why: Down, out: &mut Vec<Effect>) {
         // Anyone still waiting is told, rather than left on a deadline.
         self.abandon_queued("error this headset disconnected before it answered", out);
         // `forget` resets `last_error` with the rest of the state, so the
@@ -402,9 +440,28 @@ impl Session {
         self.forget();
         self.hanging_up = false;
         // ASKED FOR, SO NOT A FAULT. However the transport saw it, a link
-        // that drops right after the person said yes to "this will
-        // disconnect" is the headset keeping its word.
-        let why = if std::mem::take(&mut self.expect_drop) { Down::Closed } else { why };
+        // that drops while the yes to "this will disconnect" is on the wire,
+        // or shortly after the headset took it, is the headset keeping its
+        // word. Two limits on that, each of which a test holds:
+        //
+        // - IN TIME. The window is `Limits::drop_window` after the ACK, and
+        //   nothing earlier than the answer reaching the wire. Without the
+        //   bound, a yes that dropped the OTHER phone left this flag set
+        //   until this link next went down, whenever and however that was.
+        // - NOT A HANG-UP. `Down::HungUp` is this engine's own verdict --
+        //   the headset stopped acknowledging, or sent what this daemon
+        //   cannot read -- and its reason is already in `last_error`. A
+        //   headset that drops the link as promised is seen by the transport
+        //   first; one that goes silent and keeps it up has not kept its word.
+        let expected = match self.expect_drop.take() {
+            Some(ExpectDrop::Sent) => true,
+            Some(ExpectDrop::Until(deadline)) => now <= deadline,
+            Some(ExpectDrop::Queued) | None => false,
+        };
+        let why = match why {
+            Down::Closed | Down::Failed(_) if expected => Down::Closed,
+            other => other,
+        };
         self.phase = match why {
             Down::Closed => Phase::Idle,
             Down::Failed(reason) => {
@@ -519,6 +576,13 @@ impl Session {
             Some(f) if f.seq == acknowledges => {
                 let done = self.inflight.take();
                 if let Some(f) = done {
+                    // The headset has the yes: the window for the drop it
+                    // promised starts now and ends `drop_window` later.
+                    if f.pending.out.command() == Some(ALERT_SET_PARAM)
+                        && self.expect_drop == Some(ExpectDrop::Sent)
+                    {
+                        self.expect_drop = Some(ExpectDrop::Until(self.last_now + self.limits.drop_window));
+                    }
                     if let Some(id) = f.pending.waiting {
                         out.push(Effect::Reply { id, line: "ok".to_string() });
                     }
@@ -637,9 +701,14 @@ impl Session {
             // refresh queries, or refused because they filled the outbox, is
             // an answer that arrives after the person has given up on it.
             Ok(outgoing) if matches!(verb, Verb::Alert(_)) => {
-                if let (Some((message, _)), Verb::Alert(yes)) = (self.facts.alert(), &verb) {
-                    self.expect_drop = *yes && payload::alert_disconnects(message);
-                }
+                // Every answer replaces the last expectation: a no, or a yes
+                // to a message that promises nothing, leaves none.
+                self.expect_drop = match (self.facts.alert(), &verb) {
+                    (Some((message, _)), Verb::Alert(true)) if payload::alert_disconnects(message) => {
+                        Some(ExpectDrop::Queued)
+                    }
+                    _ => None,
+                };
                 self.facts.alert_answered();
                 self.state.alert = None;
                 if let Some((command, kind, _)) = outgoing.key() {
@@ -718,6 +787,9 @@ impl Session {
             }
         }
         let Some(pending) = self.outbox.pop_front() else { return };
+        if pending.out.command() == Some(ALERT_SET_PARAM) && self.expect_drop == Some(ExpectDrop::Queued) {
+            self.expect_drop = Some(ExpectDrop::Sent);
+        }
         let seq = self.tx_seq;
         let wire = frame::pack(pending.out.data_type, seq, &pending.out.payload);
         out.push(Effect::Send(wire));
@@ -727,18 +799,36 @@ impl Session {
         self.inflight = Some(InFlight { pending, seq, sent_at: self.last_now, tries: 0 });
     }
 
-    /// The ambient level's range for the mode the headset is in now, as it
-    /// stated it, or the compatibility range when it has not.
+    /// The ambient level's range IN FORCE for the mode the headset is in now:
+    /// what it stated, cut to the command language's 1..=20 -- or that 1..=20
+    /// alone when it has stated nothing.
+    ///
+    /// CUT, because two things refuse a level and a page must hear both. The
+    /// grammar refuses anything outside 1..=20 before the encoder sees it
+    /// (`sony::command`, a compatibility contract that a device range may
+    /// narrow and never widen), and the encoder refuses what the headset
+    /// stated it does not take. Publishing the headset's range as stated
+    /// offered a page 0 and 21..=32 from a headset that said 0..=32, and the
+    /// daemon refused every one of them. So a level the page offers is a
+    /// level the daemon accepts, which `the_published_range_is_the_one_in_force`
+    /// holds by sending every level the document offers.
+    ///
+    /// A stated range that shares NO level with 1..=20 has no honest
+    /// `min..=max`, so it is published with step 0 and min and max 0: every
+    /// level is refused, and the document says so rather than offering one.
     ///
     /// From `facts` rather than from the reading in hand, so the document and
-    /// the encoder answer the same question the same way: a level the page
-    /// offers is a level the encoder accepts. Re-derived on a noise reading as
-    /// well as on a capability reply, because focus-on-voice moves which of
-    /// the two ranges applies.
+    /// the encoder answer the same question the same way. Re-derived on a
+    /// noise reading as well as on a capability reply, because focus-on-voice
+    /// moves which of the two ranges applies.
     fn refresh_ambient_range(&mut self) {
         let voice = self.state.noise.focus_on_voice;
+        let compat = encode::COMPAT_AMBIENT_RANGE;
         self.state.ambient_range = match self.facts.ambient_range(voice) {
-            Some(r) => state::AmbientRange { min: r.min, max: r.max, step: r.step, from_device: true },
+            Some(stated) => match stated.within(compat.min, compat.max) {
+                Some(r) => state::AmbientRange { min: r.min, max: r.max, step: r.step, from_device: true },
+                None => state::AmbientRange { min: 0, max: 0, step: 0, from_device: true },
+            },
             None => state::AmbientRange::default(),
         };
     }

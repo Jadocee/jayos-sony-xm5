@@ -1076,6 +1076,16 @@ fn import(args: &Args) -> ExitCode {
     };
     let exclude: Vec<String> =
         args.value("exclude").map(|e| e.split(',').map(str::to_string).collect()).unwrap_or_default();
+    // A name neither table declares matches no frame, so it would exclude
+    // nothing -- and a mistyped `--exclude=PERI_RET_PARAMS` wrote the very
+    // list it was typed to keep out, and said ok. Refused like a bad
+    // `--channel`, before anything is read or written.
+    if let Some(bad) = exclude.iter().find(|name| !sony_xm5::capture::is_command_name(name)) {
+        return emit::failure(format!(
+            "--exclude names no command either table declares: {bad} (names are the fixture names' cmd- part, \
+             e.g. PERI_RET_PARAM)"
+        ));
+    }
     let bytes = match std::fs::read(file) {
         Ok(b) => b,
         Err(e) => return emit::failure(format!("cannot read {file}: {e}")),
@@ -1085,10 +1095,16 @@ fn import(args: &Args) -> ExitCode {
         Err(e) => return emit::failure(format!("{file}: {e}")),
     };
     match sony_xm5::capture::write_fixtures(&imported, Path::new(out), &exclude) {
+        // `frames` counts every span, `not_frames` the ones among them that
+        // did not unpack (counted, not written), and `unfinished` the frames
+        // a link ended in the middle of -- so `frames - not_frames - written`
+        // is what `--exclude` left out, and nothing is lost unsaid.
         Ok(names) => emit::json(&json!({
             "ok": true,
             "channel": imported.dlci >> 1,
             "frames": imported.frames.len(),
+            "not_frames": imported.not_frames(),
+            "unfinished": imported.unfinished,
             "written": names.len(),
             "out": out,
         })),
@@ -1098,9 +1114,10 @@ fn import(args: &Args) -> ExitCode {
 
 /// Which outstanding items a capture directory settles.
 ///
-/// Exit 0: every item frames can settle is settled. 1: some are still open --
-/// a definite answer, and the ordinary one. 2: the directory holds no frame,
-/// so nothing was examined, which must not read as either.
+/// Exit 0: every item frames can settle is settled. 1: some are still open,
+/// or contradicted -- a definite answer, and the ordinary one. 2: nothing was
+/// examined -- the directory holds no frame, or could not be read at all --
+/// which must not read as either.
 fn settle(args: &Args) -> ExitCode {
     use sony_xm5::capture::{self, Verdict};
     if let Some(code) = args.reject_unknown(&[]) {
@@ -1111,7 +1128,13 @@ fn settle(args: &Args) -> ExitCode {
     };
     let capture = match capture::load(Path::new(dir)) {
         Ok(c) => c,
-        Err(e) => return emit::failure(format!("cannot read {dir}: {e}")),
+        // NOT `emit::failure`, whose 1 is "some items are open": a path
+        // that does not exist examined nothing, which is the 2 below.
+        Err(e) => {
+            eprintln!("error: cannot read {dir}: {e}");
+            let _ = emit::json(&json!({ "ok": false, "error": format!("cannot read {dir}: {e}") }));
+            return ExitCode::from(2);
+        }
     };
     if capture.frames.is_empty() {
         eprintln!("error: {dir} holds no frame (*-rx.*.bin, *-tx.*.bin)");
@@ -1119,12 +1142,13 @@ fn settle(args: &Args) -> ExitCode {
         return ExitCode::from(2);
     }
     let verdicts = capture::settle(&capture);
-    let open = verdicts.iter().any(|(_, v)| *v == Verdict::Open);
+    let open = verdicts.iter().any(|(_, v)| matches!(v, Verdict::Open | Verdict::Contradicted(_)));
     let items: Vec<Value> = verdicts
         .iter()
         .map(|(item, verdict)| {
             let (state, detail) = match verdict {
                 Verdict::Settled(what) => ("settled", what.clone()),
+                Verdict::Contradicted(what) => ("contradicted", what.clone()),
                 Verdict::Open => ("open", String::new()),
                 Verdict::NotFromFrames(how) => ("not-from-frames", (*how).to_string()),
             };

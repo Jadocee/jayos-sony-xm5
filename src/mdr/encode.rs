@@ -160,6 +160,13 @@ pub enum Evidence {
     /// Transcribed from the header, with no frame in either direction and no
     /// twin to mirror it against.
     HeaderOnly { set: &'static str, unverified: &'static str },
+    /// The layout is the header's, and the VALUE is one the header's own
+    /// `CODEGEN EnumRange` on that field excludes -- sent because the field's
+    /// enum names it and a verb asks for it. Weaker than
+    /// [`Evidence::HeaderOnly`]: the header does not merely leave it
+    /// unconfirmed, it says otherwise. `encode_connection`'s `quality` is the
+    /// write that stands here, and says why it is sent at all.
+    AgainstHeader { set: &'static str, why: &'static str },
 }
 
 impl Evidence {
@@ -169,6 +176,7 @@ impl Evidence {
             Evidence::ReferenceClient { .. } => "reference-client",
             Evidence::ThirdParty { .. } => "third-party",
             Evidence::HeaderOnly { .. } => "header-only",
+            Evidence::AgainstHeader { .. } => "against-header",
         }
     }
 
@@ -178,7 +186,8 @@ impl Evidence {
             Evidence::MirroredCapture { set, .. }
             | Evidence::ReferenceClient { set, .. }
             | Evidence::ThirdParty { set, .. }
-            | Evidence::HeaderOnly { set, .. } => set,
+            | Evidence::HeaderOnly { set, .. }
+            | Evidence::AgainstHeader { set, .. } => set,
         }
     }
 }
@@ -686,8 +695,9 @@ impl NcAsmEdit<'_> {
 }
 
 /// The ambient level's bound when the headset has not stated one: the C++
-/// daemon's 1..=20 in steps of one, which is also what libmdr and Gadgetbridge
-/// enforce. A compatibility choice, not a fact; see [`AmbientRange`].
+/// daemon's 1..=20 in steps of one, whose maximum of 20 is also libmdr's and
+/// Gadgetbridge's -- both of which accept 0 as well. A compatibility choice,
+/// not a fact; see [`AmbientRange`].
 pub const COMPAT_AMBIENT_RANGE: AmbientRange = AmbientRange { voice: false, min: 1, max: 20, step: 1 };
 
 /// One NC/ASM write, built in the layout the headset itself last answered in.
@@ -949,8 +959,8 @@ fn encode_eq_preset(facts: &Facts, name: &str) -> Result<Outgoing, Refusal> {
     ))
 }
 
-/// `GeneralSettingSetParam` (0xD8): switch one of the headset's own named
-/// settings.
+/// `GsSetParamBoolean` (0xD8, T1:4323): switch one of the headset's own
+/// named settings.
 ///
 /// ADDRESSED BY THE DEVICE'S NAME, NOT BY A SLOT NUMBER, because the slot is
 /// not stable across models: a WF-1000XM5 puts sidetone in 0xD1 and a
@@ -959,7 +969,7 @@ fn encode_eq_preset(facts: &Facts, name: &str) -> Result<Outgoing, Refusal> {
 /// and this looks it up in what the headset said rather than in a table here.
 ///
 /// MIRRORED CAPTURE, on the RET twin. Fixtures 000035 (`d7 d1 00 01`) and
-/// 000043 (`d7 d2 00 00`) are `GeneralSettingRetParam`, and the SET is the
+/// 000043 (`d7 d2 00 00`) are `GsRetParamBoolean` (T1:4267), and the SET is the
 /// same four bytes with the command advanced by one -- the same
 /// RET-is-the-SET property the other five verbs stand on, and the reason the
 /// round-trip test can put this frame back through the real decoder.
@@ -979,13 +989,15 @@ fn encode_eq_preset(facts: &Facts, name: &str) -> Result<Outgoing, Refusal> {
 /// tree has spoken to a headset, so whether the write sticks is their claim.
 /// What IS ours is the frame's shape, which the capture settles.
 ///
-/// THE FIRST MATCH WINS, and the corpus cannot say whether that is ever a
-/// choice. Two slots whose keys collided -- `X_SETTING` beside a bare `X` --
-/// would make `general x` address the lower slot silently. No capture and no
-/// reference list contains such a pair, and inventing a tie-break for a shape
-/// nobody has seen would be a guess wearing a rule; what the document does
-/// instead is publish both rows with their slots, so the collision is visible
-/// to a reader even though this verb cannot express it.
+/// A NAME TWO SLOTS ANSWER TO IS REFUSED, NOT RESOLVED. A slot answers to its
+/// trimmed key and to its full name lowercased, and the two are unioned, so
+/// `X_SETTING` beside a bare `X` both answer `general x`: that is
+/// `Refusal::Collision`, listing the slots, and the full name of either
+/// (`general x_setting`) reaches it. No capture and no reference list
+/// contains such a pair, and a tie-break for a shape nobody has seen would be
+/// a guess wearing a rule -- so the verb does not pick one, and the document
+/// publishes both rows with their slots. The body says why it is a union and
+/// not full-name-first. Plan 23, item 12.
 fn encode_general_setting(facts: &Facts, key: &str, on: bool) -> Result<Outgoing, Refusal> {
     let verb = "general";
     // EVERY MATCH, NOT THE FIRST. This was `.find`, which wrote whichever slot
@@ -1025,8 +1037,8 @@ fn encode_general_setting(facts: &Facts, key: &str, on: bool) -> Result<Outgoing
         DataType::DataMdr,
         Evidence::MirroredCapture {
             fixture: "000035",
-            set: "GeneralSettingSetParam",
-            ret: "GeneralSettingRetParam",
+            set: "GsSetParamBoolean",
+            ret: "GsRetParamBoolean",
         },
         0xD8,
         slot,
@@ -1281,16 +1293,38 @@ const ENABLE: u8 = 0x00;
 ///   0x02  `AudioSetParamConnectionWithLdacStatus` (T1:3084). The RET
 ///         (T1:2814), this SET and the NTFY (T1:2637) all pin the type with
 ///         `CODEGEN EnumRange` and are field-identical: command, type,
-///         `PriorMode`. HEADER ONLY -- no capture either way -- but a pinned
-///         triple is the strongest header-only there is.
+///         `PriorMode`. HEADER ONLY for `stable` -- no capture either way.
 ///   0x00  `AudioSetParamConnection` (T1:3056) at CONNECTION_MODE, which is
 ///         NOT what the header declares: that struct pins its type to 0x05,
 ///         the LE Audio form, and libmdr sends it unchanged -- `e8 05 <mode>`
 ///         (`HeadphonesV2.cpp:664-673`), three bytes at a type whose own SET
 ///         is four. mos9527/SonyHeadphonesClient PR #64 changed it to
-///         `e8 00 <mode>` and reports that working on a WF-LC900. THIRD PARTY,
-///         and on a different headset; it is sent only to a headset that has
-///         itself answered at 0x00, so the type is at least its own.
+///         `e8 00 <mode>` and reports that working on a WF-LC900. THIRD PARTY
+///         for `stable`, and on a different headset; it is sent only to a
+///         headset that has itself answered at 0x00, so the type is at least
+///         its own.
+///
+/// THE VALUE IS PINNED TOO, AND `quality` IS OUTSIDE THE PIN. Every
+/// connection struct in the header -- the RETs (T1:2807, 2820), the SETs
+/// (T1:3062, 3075, 3090) and the NTFYs (T1:2615, 2628, 2643), cited at the
+/// line that says so -- carries `CODEGEN EnumRange
+/// PriorMode::CONNECTION_QUALITY_PRIOR` on `settingValue`. This port reads an
+/// EnumRange on a field as a constraint (`tests/fixtures/mdr/PROVENANCE.md:639`;
+/// `encode_playback` takes its four words from one), and libmdr's generated validation enforces
+/// this one (`ProtocolV2T1Validation.cpp:631,650` for the SETs, `:470,479` for
+/// the RETs, run by every `Serialize` and `Deserialize`, `Protocol.hpp:533-553`):
+/// libmdr itself can neither send SOUND_QUALITY_PRIOR nor read a reply
+/// carrying it. So `stable` (0x01) is inside the header's range and `quality`
+/// (0x00) is not, and `quality` goes out as [`Evidence::AgainstHeader`], the
+/// weakest tier there is.
+///
+/// WHY IT IS SENT AT ALL rather than refused: `PriorMode` (T1:1399) names
+/// 0x00 SOUND_QUALITY_PRIOR, `quality` is the C++ daemon's word for it, and
+/// read as a statement about the device the pin says something no evidence
+/// here supports -- that a headset's RET never reports sound-quality priority,
+/// making the setting a switch with one position. Whether it is that or a
+/// generator's artifact is the capture's to say: a WH-1000XM5 reporting
+/// `e7 02 00`, or taking `e8 02 00`, settles it (item 4).
 ///
 /// WHAT IS STILL REFUSED. A headset that has not answered gets `NotRead` when
 /// it advertises t1 0xE1 or 0xE3 (the GET is in [`feature_gets`]). One that
@@ -1305,12 +1339,24 @@ fn encode_connection(facts: &Facts, word: &str) -> Result<Outgoing, Refusal> {
         "stable" => PriorMode::ConnectionQuality,
         other => return Err(Refusal::NoEncoder { verb, why: leaked(other) }),
     };
+    // Inside the header's range only for CONNECTION_QUALITY_PRIOR; see above.
+    let against = |set: &'static str| Evidence::AgainstHeader {
+        set,
+        why: "settingValue's CODEGEN EnumRange admits CONNECTION_QUALITY_PRIOR alone, and libmdr's \
+              generated validation enforces it; SOUND_QUALITY_PRIOR is sent on PriorMode's name",
+    };
+    let in_range = prior == PriorMode::ConnectionQuality;
     match facts.connection.as_ref() {
         Some(Observed { kind: 0x02, len: 3, .. }) => Ok(Outgoing::new(
             DataType::DataMdr,
-            Evidence::HeaderOnly {
-                set: "AudioSetParamConnectionWithLdacStatus",
-                unverified: "no frame either way; RET, SET and NTFY pin the type and agree field for field",
+            if in_range {
+                Evidence::HeaderOnly {
+                    set: "AudioSetParamConnectionWithLdacStatus",
+                    unverified: "no frame either way; RET, SET and NTFY pin the type and value and agree \
+                                 field for field",
+                }
+            } else {
+                against("AudioSetParamConnectionWithLdacStatus")
             },
             0xE8,
             0x02,
@@ -1318,9 +1364,13 @@ fn encode_connection(facts: &Facts, word: &str) -> Result<Outgoing, Refusal> {
         )),
         Some(Observed { kind: 0x00, len: 3, .. }) => Ok(Outgoing::new(
             DataType::DataMdr,
-            Evidence::ThirdParty {
-                set: "AudioSetParamConnection",
-                source: "mos9527/SonyHeadphonesClient PR #64: e8 00 <mode>, reported on a WF-LC900",
+            if in_range {
+                Evidence::ThirdParty {
+                    set: "AudioSetParamConnection",
+                    source: "mos9527/SonyHeadphonesClient PR #64: e8 00 <mode>, reported on a WF-LC900",
+                }
+            } else {
+                against("AudioSetParamConnection")
             },
             0xE8,
             0x00,
@@ -1504,8 +1554,12 @@ pub fn feature_gets(facts: &Facts) -> Vec<Outgoing> {
 /// the types):
 ///
 ///   PERI       0x32/0x33 (pairing management with class of device) ask
-///              status and param at 0x02; 0x30 (classic only) at 0x00.
-///              libmdr's order and gating (`HeadphonesV2.cpp:125-157`).
+///              status and param at 0x02; else 0x30 (classic only) at 0x00.
+///              libmdr's types and order (`HeadphonesV2.cpp:125-157`), and
+///              THIS PORT'S gating: libmdr asks both forms when both are
+///              advertised, in two separate `if`s; this asks one, the 0x02
+///              form first, because 0x02 is the only type its PERI decoders
+///              read and a second pair of replies would arrive unread.
 ///   SAFE LIST. the first of HBS_1, HBS_2, TWS_1, TWS_2 advertised (0x50,
 ///              0x52, 0x51, 0x53) asks the extended param at its own type --
 ///              libmdr's order (`HeadphonesV2.cpp:274-292`).
@@ -1549,7 +1603,7 @@ fn table_two_gets(facts: &Facts) -> Vec<Outgoing> {
 /// The inquired type to ask NC/ASM at, from the function the headset
 /// advertises, or `None` when it advertises none this port reads.
 ///
-/// libmdr's order (`HeadphonesV2.cpp` `RequestInitV2`): 0x6B
+/// libmdr's order (`HeadphonesV2.cpp:107-123`, `RequestInitV2Selected`): 0x6B
 /// (MODE_NC_ASM_..._LEVEL_ADJUSTMENT) asks 0x17, 0x6D (the noise-adaptation
 /// variant) asks 0x19, 0x67 (AMBIENT_SOUND_MODE_LEVEL_ADJUSTMENT) asks 0x22.
 /// Then 0x68 (MODE_NC_ASM_..._DUAL_AUTO_...), which libmdr does not ask about
@@ -1572,7 +1626,8 @@ fn ncasm_type(facts: &Facts) -> Option<u8> {
 /// the shape every other GET has, which is a short struct: what a headset
 /// makes of a GET missing its last field is not something any capture shows.
 /// The reference client sends `ENGLISH` (0x01, T1:636; libmdr
-/// `HeadphonesV2.cpp` `RequestInitV2`, every slot), so this does too. The names
+/// `HeadphonesV2.cpp:44-80`, `RequestInitV2Selected`, every slot), so this
+/// does too. The names
 /// the corpus carries are `GsStringFormat::ENUM_NAME` identifiers
 /// (`MULTIPOINT_SETTING`), so the language changes nothing this port reads
 /// today; it is sent because the struct has the field.
