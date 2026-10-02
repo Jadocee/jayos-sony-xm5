@@ -128,6 +128,10 @@ const OUR_ADDITIONS: &str = concat!(
     // Plan 23, item 10: whether DSEE can run now. `null` until the headset's
     // AUDIO_RET_STATUS at UPSCALING says; the mock state has not been told.
     r#","dsee_available":null"#,
+    // Plan 23, item 11: table 2's voice guidance, safe listening and pairing
+    // mode, every one `null` until the headset has said.
+    r#","voice_guidance":{"enabled":null,"volume":null,"language":null}"#,
+    r#","safe_listening":{"level":null,"cause":null},"pairing_mode":null"#,
 );
 
 #[test]

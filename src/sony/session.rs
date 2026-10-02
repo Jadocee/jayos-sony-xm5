@@ -825,6 +825,23 @@ impl Session {
             payload::Reading::PlayStatus(report) => {
                 self.state.playback.status = report.status.as_str().to_string();
             }
+            payload::Reading::VoiceGuidance(report) => {
+                let vg = &mut self.state.voice_guidance;
+                if let Some(on) = report.enabled.and_then(|s| s.as_bool()) {
+                    vg.enabled = Some(on);
+                }
+                if let Some(volume) = report.volume {
+                    vg.volume = Some(volume);
+                }
+                if let Some(byte) = report.language {
+                    vg.language = Some(payload::voice_guidance_language(byte).to_string());
+                }
+            }
+            payload::Reading::SafeListening(report) => {
+                self.state.safe_listening.level = Some(report.level);
+                self.state.safe_listening.cause = Some(report.cause_word().to_string());
+            }
+            payload::Reading::PairingMode { on } => self.state.pairing_mode = Some(*on),
             payload::Reading::UpscalingStatus { available } => {
                 // `null` stays `null` for a byte EnableDisable does not name:
                 // "the headset said something else" is not "unavailable".

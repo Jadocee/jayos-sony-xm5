@@ -898,13 +898,10 @@ fn the_queries_ask_for_every_family_the_corpus_answers() {
         if frame.data_type == DataType::Ack {
             continue;
         }
-        // SAFE_LISTENING, PERI and VOICE_GUIDANCE are table 2 families this
-        // port does not read, so it does not ask for them either. Nothing on
-        // table 1 is exempt: COMMON_RET_STATUS answers to CODEC_INDICATOR and
-        // the codec query below must cover it.
-        if [0x5Bu8, 0x33, 0x37, 0x47].contains(&command) {
-            continue;
-        }
+        // NOTHING IS EXEMPT ANY MORE. SAFE_LISTENING, PERI and VOICE_GUIDANCE
+        // (0x5B, 0x33, 0x37, 0x47) were, as table-2 families this port did
+        // not ask about; plan 23, item 11 asks them, so the corpus's every
+        // reply on either table must be one a query here would have earned.
         if !asked.iter().any(|(c, k, t)| *c == command && *k == kind && *t == frame.data_type) {
             unasked.push((command, kind));
         }
@@ -1114,4 +1111,59 @@ fn the_ambient_level_is_held_to_the_range_the_headset_stated() {
         encode::encode(&none, &Verb::AmbientLevel(21)),
         Err(Refusal::OutOfDeviceRange { min: 1, max: 20, .. })
     ));
+}
+
+/// Facts from a synthetic table-2 support list carrying only `codes`.
+fn only_table_two(codes: &[u8]) -> Facts {
+    let mut payload = vec![0x07, 0x00, codes.len() as u8];
+    for code in codes {
+        payload.extend_from_slice(&[*code, 0xFF]);
+    }
+    let mut facts = Facts::blank();
+    facts.observe(DataType::DataMdrNo2, &payload);
+    facts
+}
+
+#[test]
+fn table_two_is_asked_what_its_own_functions_name() {
+    // PLAN 23, ITEM 11. Nothing was ever asked on table 2 before; the corpus's
+    // table-2 replies answered the recording app.
+    let asked = |facts: &Facts| -> Vec<(DataType, Vec<u8>)> {
+        encode::feature_gets(facts)
+            .into_iter()
+            .filter(|g| g.data_type == DataType::DataMdrNo2)
+            .map(|g| (g.data_type, g.payload))
+            .collect()
+    };
+    let no2 = |bytes: &[u8]| (DataType::DataMdrNo2, bytes.to_vec());
+
+    // The captured WF-1000XM5: t2 0x32 (pairing with class of device), 0x53
+    // (SAFE_LISTENING_TWS_2) and 0x42 (voice guidance with language switch
+    // AND volume adjustment). Exactly the five replies the corpus holds.
+    assert_eq!(
+        asked(&captured_facts()),
+        vec![no2(&[0x32, 0x02]), no2(&[0x36, 0x02]), no2(&[0x5A, 0x03]), no2(&[0x46, 0x01]), no2(&[0x46, 0x20])]
+    );
+
+    // The plan's synthetic case: HBS_1, classic-only pairing, and the
+    // language-switch voice guidance WITHOUT volume adjustment -- so the
+    // safe-listening type is 0x00, pairing is asked at 0x00, and there is no
+    // volume query.
+    let got = asked(&only_table_two(&[0x50, 0x30, 0x41]));
+    assert_eq!(got, vec![no2(&[0x32, 0x00]), no2(&[0x36, 0x00]), no2(&[0x5A, 0x00]), no2(&[0x46, 0x01])]);
+    assert!(!got.contains(&no2(&[0x46, 0x20])), "a volume asked of a headset that has none");
+
+    // libmdr's safe-listening order: HBS_1, HBS_2, TWS_1, TWS_2, first only.
+    for (functions, kind) in [(&[0x53u8, 0x51][..], 0x01u8), (&[0x53, 0x52], 0x02), (&[0x53], 0x03)] {
+        let sl: Vec<_> = asked(&only_table_two(functions)).into_iter().filter(|(_, p)| p[0] == 0x5A).collect();
+        assert_eq!(sl, vec![no2(&[0x5A, kind])], "{functions:02x?}");
+    }
+
+    // TABLE 2 IS ITS OWN NAMESPACE. The same codes on table 1 earn nothing
+    // here: t1 0x42 and 0x53 are other functions entirely.
+    assert!(asked(&only_table_one(&[0x32, 0x42, 0x50, 0x53])).is_empty());
+    // And no table-2 question goes out on table 1's channel.
+    for g in encode::feature_gets(&only_table_two(&[0x32, 0x42, 0x53])) {
+        assert_eq!(g.data_type, DataType::DataMdrNo2, "{g:?}");
+    }
 }

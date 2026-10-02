@@ -500,7 +500,10 @@ impl Facts {
             | Reading::Battery(_)
             | Reading::Codec(_)
             | Reading::PairedDevices(_)
-            | Reading::UpscalingStatus { .. } => {}
+            | Reading::UpscalingStatus { .. }
+            | Reading::VoiceGuidance(_)
+            | Reading::SafeListening(_)
+            | Reading::PairingMode { .. } => {}
         }
     }
 
@@ -518,6 +521,12 @@ impl Facts {
 
     pub(crate) fn advertises_one(&self, codes: &[u8]) -> bool {
         self.table_one.iter().any(|f| codes.contains(&f.code))
+    }
+
+    /// The same question of table 2, which is a separate namespace: t2 0x42
+    /// is a voice-guidance form and t1 0x42 is something else entirely.
+    pub(crate) fn advertises_two(&self, codes: &[u8]) -> bool {
+        self.table_two.iter().any(|f| codes.contains(&f.code))
     }
 }
 
@@ -1358,6 +1367,59 @@ pub fn feature_gets(facts: &Facts) -> Vec<Outgoing> {
             out.push(gs_get_capability(slot));
             out.push(get(DataType::DataMdr, 0xD6, slot, "GsGetParam"));
         }
+    }
+    out.extend(table_two_gets(facts));
+    out
+}
+
+/// The table-2 queries, on DATA_MDR_NO2. Plan 23, item 11.
+///
+/// NONE WAS EVER SENT BEFORE THIS, although four table-2 families were
+/// decodable or nearly so: the corpus's table-2 replies were answers to the
+/// recording app's questions, and this port asked none of them. Each is asked
+/// for only what the table advertises, and at the type that function names
+/// (`ProtocolV2.hpp:262-279` for the functions, T2's `*InquiredType` enums for
+/// the types):
+///
+///   PERI       0x32/0x33 (pairing management with class of device) ask
+///              status and param at 0x02; 0x30 (classic only) at 0x00.
+///              libmdr's order and gating (`HeadphonesV2.cpp:125-157`).
+///   SAFE LIST. the first of HBS_1, HBS_2, TWS_1, TWS_2 advertised (0x50,
+///              0x52, 0x51, 0x53) asks the extended param at its own type --
+///              libmdr's order (`HeadphonesV2.cpp:274-292`).
+///   VOICE GD.  each setting form at its own type, and the volume only for
+///              0x42, whose name says VOLUME_ADJUSTMENT. libmdr asks 0x01 and
+///              0x20 of every table-2 headset whatever it advertises
+///              (`HeadphonesV2.cpp:216-227`); this asks what the table names,
+///              which is HEADER ONLY as a gate.
+fn table_two_gets(facts: &Facts) -> Vec<Outgoing> {
+    let mut out = Vec::new();
+    let two = |command: u8, kind: u8, cite: &'static str| get(DataType::DataMdrNo2, command, kind, cite);
+    let peri = if facts.advertises_two(&[0x32, 0x33]) {
+        Some(0x02)
+    } else if facts.advertises_two(&[0x30]) {
+        Some(0x00)
+    } else {
+        None
+    };
+    if let Some(kind) = peri {
+        out.push(two(0x32, kind, "PeripheralGetStatus"));
+        out.push(two(0x36, kind, "PeripheralGetParam"));
+    }
+    if let Some(kind) = [(0x50u8, 0x00u8), (0x52, 0x02), (0x51, 0x01), (0x53, 0x03)]
+        .into_iter()
+        .find(|(function, _)| facts.advertises_two(&[*function]))
+        .map(|(_, kind)| kind)
+    {
+        out.push(two(0x5A, kind, "SafeListeningGetExtendedParam"));
+    }
+    for (function, kind) in [(0x40u8, 0x00u8), (0x41, 0x01), (0x42, 0x01), (0x44, 0x02), (0x45, 0x03)] {
+        if facts.advertises_two(&[function]) && !out.iter().any(|q| q.payload == [0x46, kind]) {
+            out.push(two(0x46, kind, "VoiceGuidanceGetParam"));
+        }
+    }
+    if facts.advertises_two(&[0x42]) {
+        out.push(two(0x46, 0x20, "VoiceGuidanceGetParam"));
     }
     out
 }

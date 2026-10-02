@@ -526,9 +526,36 @@ pub struct State {
     /// the reason `ambient_range` is: `equalizer` is the C++ daemon's object.
     /// A page uses it to say why a DSEE switch that is on is doing nothing.
     pub dsee_available: Option<bool>,
+    /// The spoken prompts, from table 2. Plan 23, item 11; every field `null`
+    /// until the headset has said.
+    pub voice_guidance: VoiceGuidance,
+    /// Safe listening's two raw bytes, from table 2: a level and the reason it
+    /// may not mean anything. Not interpreted -- see
+    /// `mdr::payload::decode_safe_listening`.
+    pub safe_listening: SafeListening,
+    /// Whether the headset is discoverable for pairing, from table 2.
+    pub pairing_mode: Option<bool>,
     /// The last thing that went wrong, or empty. A page shows this instead of
     /// looking broken when there is nothing to show.
     pub last_error: String,
+}
+
+/// Voice guidance, as the document publishes it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VoiceGuidance {
+    pub enabled: Option<bool>,
+    /// -2..=2.
+    pub volume: Option<i8>,
+    /// `english`, `japanese`, ... -- `VoiceGuidanceLanguage` lowercased.
+    pub language: Option<String>,
+}
+
+/// Safe listening, as the document publishes it: raw.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SafeListening {
+    pub level: Option<u8>,
+    /// `not_playing`, `in_call`, `detached` or `unknown`.
+    pub cause: Option<String>,
 }
 
 /// The ambient level's range, as the document publishes it.
@@ -568,6 +595,9 @@ impl Default for State {
             paired_devices: Vec::new(),
             ambient_range: AmbientRange::default(),
             dsee_available: None,
+            voice_guidance: VoiceGuidance::default(),
+            safe_listening: SafeListening::default(),
+            pairing_mode: None,
             last_error: String::new(),
         }
     }
@@ -653,6 +683,12 @@ pub fn json_escape(value: &str) -> String {
         }
     }
     out
+}
+
+/// An already-rendered JSON value, or `null`. "Not told yet" and a value are
+/// different answers and a page draws them differently.
+fn json_or_null(value: Option<String>) -> String {
+    value.unwrap_or_else(|| "null".to_string())
 }
 
 fn bool_json(v: bool) -> &'static str {
@@ -829,6 +865,22 @@ pub fn serialize(state: &State, daemon_version: &str) -> String {
             None => "null",
         }
     );
+    let vg = &state.voice_guidance;
+    let _ = write!(
+        out,
+        ",\"voice_guidance\":{{\"enabled\":{},\"volume\":{},\"language\":{}}}",
+        json_or_null(vg.enabled.map(|b| bool_json(b).to_string())),
+        json_or_null(vg.volume.map(|v| v.to_string())),
+        json_or_null(vg.language.as_deref().map(|l| format!("\"{}\"", json_escape(l)))),
+    );
+    let sl = &state.safe_listening;
+    let _ = write!(
+        out,
+        ",\"safe_listening\":{{\"level\":{},\"cause\":{}}}",
+        json_or_null(sl.level.map(|v| v.to_string())),
+        json_or_null(sl.cause.as_deref().map(|c| format!("\"{}\"", json_escape(c)))),
+    );
+    let _ = write!(out, ",\"pairing_mode\":{}", json_or_null(state.pairing_mode.map(|b| bool_json(b).to_string())));
     let _ = write!(out, ",\"last_error\":\"{}\"}}", json_escape(&state.last_error));
     // The trailing newline is part of the document: the file ends in exactly
     // this one, the `"}\n"` the reference's `serializeState` (state.cpp)

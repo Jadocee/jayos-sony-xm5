@@ -675,11 +675,13 @@ directions:
   not 0x20, so exactly two `POWER_GET_STATUS` queries go out, at 0x09 and
   0x0A, and none at 0x00.
 
-The exceptions are named rather than filtered quietly: `SAFE_LISTENING`,
-`PERI` and `VOICE_GUIDANCE` are table-2 families this port does not read — so
-it does not ask for them either. `COMMON_RET_STATUS` is not an exception: it
-answers to t1 `CODEC_INDICATOR` (0x12), which the captured table 1 advertises,
-and the codec query is gated on exactly that function.
+The exceptions were named rather than filtered quietly: `SAFE_LISTENING`,
+`PERI` and `VOICE_GUIDANCE` were table-2 families this port did not read — so
+it did not ask for them either. Plan 23 (2026-10-02) reads and asks all three,
+and the exemption list is gone: every reply the corpus holds, on either table,
+is one a query earns. `COMMON_RET_STATUS` was never an exception: it answers
+to t1 `CODEC_INDICATOR` (0x12), which the captured table 1 advertises, and the
+codec query is gated on exactly that function.
 
 ## What the corpus settles about a SESSION
 

@@ -1542,6 +1542,16 @@ fn connection_playback_and_dsee_availability_reach_the_document() {
     assert_eq!(v["playback"]["status"], "paused");
     assert_eq!(v["dsee_available"], true);
     assert_eq!(v["connection"]["priority"], "unknown");
+    // ITEM 11, table 2: the five replies the corpus holds, read.
+    assert_eq!(v["voice_guidance"], serde_json::json!({"enabled": true, "volume": 0, "language": "english"}));
+    assert_eq!(v["safe_listening"], serde_json::json!({"level": 255, "cause": "not_playing"}));
+    assert_eq!(v["pairing_mode"], false);
+    // And a volunteered pairing-mode change on table 2 moves it.
+    let at = 9_000;
+    let ntfy = frame::pack(DataType::DataMdrNo2, 0, &[0x35, 0x02, 0x01, 0x00]);
+    session.step(Input::Bytes { now: at, bytes: &ntfy });
+    let v: serde_json::Value = serde_json::from_str(&session.document()).expect("json");
+    assert_eq!(v["pairing_mode"], true);
 
     // An over-ear headset advertising the LDAC connection form (0xE3), a
     // playback controller (0xA1) and DSEE (0xE2). Synthetic: no WH capture.

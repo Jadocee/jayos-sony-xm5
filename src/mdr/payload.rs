@@ -796,6 +796,63 @@ pub struct PlayStatusReport {
     pub status: PlaybackStatus,
 }
 
+/// What one voice-guidance reply said. Each message fills its own fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VoiceGuidanceReport {
+    pub enabled: Option<Switch>,
+    /// `VoiceGuidanceLanguage` (T2:620), raw; [`voice_guidance_language`]
+    /// names it.
+    pub language: Option<u8>,
+    /// -2..=2, zero centred.
+    pub volume: Option<i8>,
+}
+
+/// `VoiceGuidanceLanguage` (T2:620) as a lowercase word, `unknown` for a byte
+/// it does not name.
+pub fn voice_guidance_language(byte: u8) -> &'static str {
+    match byte {
+        0x00 => "undefined",
+        0x01 => "english",
+        0x02 => "french",
+        0x03 => "german",
+        0x04 => "spanish",
+        0x05 => "italian",
+        0x06 => "portuguese",
+        0x07 => "dutch",
+        0x08 => "swedish",
+        0x09 => "finnish",
+        0x0A => "russian",
+        0x0B => "japanese",
+        0x0D => "brazilian_portuguese",
+        0x0F => "korean",
+        0x10 => "turkish",
+        0xF0 => "chinese",
+        _ => "unknown",
+    }
+}
+
+/// `SafeListeningRetExtendedParam`'s two value bytes, unread beyond naming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SafeListeningReport {
+    /// `levelPerPeriod`, `CODEGEN Range 0 255`.
+    pub level: u8,
+    /// `SafeListeningErrorCause` (T2:424), raw.
+    pub cause: u8,
+}
+
+impl SafeListeningReport {
+    /// The cause as a lowercase word: `not_playing`, `in_call`, `detached`,
+    /// or `unknown`.
+    pub fn cause_word(self) -> &'static str {
+        match self.cause {
+            0x00 => "not_playing",
+            0x01 => "in_call",
+            0x02 => "detached",
+            _ => "unknown",
+        }
+    }
+}
+
 /// `UpscalingType`: which DSEE this headset has.
 ///
 /// The variants carry the header's names; the document's words come from
@@ -1100,6 +1157,15 @@ pub enum Reading {
     /// the headset answered. HEADER ONLY: no capture holds an
     /// `NCASM_RET_CAPABILITY`. See [`decode_noise_capability`].
     NoiseCapability { kind: u8, ranges: Vec<AmbientRange> },
+    /// The headset's spoken prompts: on or off, in which language, how loud.
+    /// TABLE TWO -- see [`decode_voice_guidance`].
+    VoiceGuidance(VoiceGuidanceReport),
+    /// Safe listening's sound-pressure figure, raw. TABLE TWO -- see
+    /// [`decode_safe_listening`].
+    SafeListening(SafeListeningReport),
+    /// Whether the headset is discoverable for pairing. TABLE TWO -- see
+    /// [`decode_pairing_mode`].
+    PairingMode { on: bool },
     /// Every device this headset is paired with, and which of them it is
     /// talking to. TABLE TWO -- see [`decode_paired_devices`].
     ///
@@ -1238,8 +1304,9 @@ pub fn decode(data_type: super::DataType, payload: &[u8]) -> Reading {
     // explains why it had to be: a table-2 frame put through the table-1 match
     // produces a plausible reading of the wrong message. That argument is
     // about the NAMES, though, not about the channel -- the fix is a second
-    // decoder, not a permanent silence, and the corpus contains five table-2
-    // frames the daemon has been logging as undecodable since it was written.
+    // decoder, not a permanent silence. The corpus contains five table-2
+    // frames beyond the support list; the daemon logged them as undecodable
+    // until plan 23, and now reads all five.
     //
     // `decode_table_two` matches on `message.command.to_byte()` and never on a
     // `Command` variant, so no table-1 name can leak across. The round trip
@@ -1301,32 +1368,34 @@ pub fn decode(data_type: super::DataType, payload: &[u8]) -> Reading {
 
 /// Table 2's messages, which are a different namespace with the same bytes.
 ///
-/// ONE FAMILY, AND THE OTHER THREE ARE REFUSED ON PURPOSE. The corpus holds
-/// five table-2 frames and this reads one of them. The four it does not are
-/// not an oversight, and each is a different reason:
+/// FOUR FAMILIES, ALL FIVE OF THE CORPUS'S TABLE-2 REPLIES. This read one of
+/// them for a long time and refused the other four on stated grounds; plan 23
+/// (item 11) went back to each ground with the reference client in hand, and
+/// each turned out to be answerable without a second capture:
 ///
-/// - `VOICE_GUIDANCE_RET_PARAM` (0x47) at 0x01 is `00 01`: two bytes, one of
-///   which is presumably the switch. WHICH one, and with which polarity, the
-///   corpus cannot say -- there is a single capture in a single state, and
-///   `decode_speak_to_chat` two hundred lines below documents a table-1 enum
-///   in this protocol whose on/off is INVERTED. A guess here produces a switch
-///   that reads backwards, which is worse than no switch. A second capture
-///   with voice guidance in the other position settles it in one frame.
-/// - `VOICE_GUIDANCE_RET_PARAM` at 0x20 is `00`: a volume, on a scale nothing
-///   in the corpus bounds. The device advertises
-///   `..._MTK_FIXED_TO_5_STEPS` (t2 0x43) which suggests five, and "suggests"
-///   is not a bound to draw a slider against.
-/// - `SAFE_LISTENING_RET_EXTENDED_PARAM` (0x5B) at 0x03 is `ff 00`. 0xFF in
-///   this protocol is a real value in one place and a not-applicable sentinel
-///   in another -- `NO_PRIORITY` in the support tables, and a declared
-///   function code at `HEAD_GESTURE_ON_OFF_TRAINING`. One frame cannot tell
-///   which it is being here.
-/// - `PERI_RET_STATUS` (0x33) at 0x02 is `00 00`, and the state document has
-///   nowhere to put it even if the two bytes were named.
+/// - `VOICE_GUIDANCE_RET_PARAM` (0x47) at 0x01, `00 01`. Refused because one
+///   capture in one state cannot fix a polarity. The header can: the struct
+///   (`VoiceGuidanceRetParamSettingMtkSupportLangSwitchAndSupportLangSwitch`)
+///   names the byte an `OnOffSettingValue`, and libmdr reads it `== ON`
+///   (`HeadphonesV2T2.cpp:36-40`). So `00` is ON and `01` is ENGLISH.
+/// - The same at 0x20, `00`. Refused as "a volume on a scale nothing bounds",
+///   citing an advertised `..._MTK_FIXED_TO_5_STEPS` (t2 0x43) that the
+///   captured table does not in fact carry -- it advertises 0x42, the
+///   VOLUME_ADJUSTMENT form. `VoiceGuidanceRetParamVolume` bounds it:
+///   `// CODEGEN Range -2 2` on an `Int8`. Five steps, signed, zero centred.
+/// - `SAFE_LISTENING_RET_EXTENDED_PARAM` (0x5B) at 0x03, `ff 00`. Refused
+///   because 0xFF is a sentinel in some places. Here it is `UInt8
+///   levelPerPeriod` with `// CODEGEN Range 0 255` -- a real value -- next to
+///   `SafeListeningErrorCause::NOT_PLAYING`. Published raw, both of them:
+///   what a level of 255 while not playing MEANS is not something this port
+///   decides.
+/// - `PERI_RET_STATUS` (0x33) at 0x02, `00 00`. Refused because the document
+///   had nowhere to put it. It has now: libmdr reads these two bytes as
+///   pairing mode, `btMode == INQUIRY_SCAN_MODE && status == ENABLE`
+///   (`HeadphonesV2T2.cpp:66-74`), and so does this.
 ///
-/// All four keep arriving as [`Reading::Unhandled`] carrying their command,
-/// kind and length, which is what the daemon logs and what somebody extending
-/// this port starts from.
+/// Every one of these is [`Grounds::ReferenceClient`] and not CAPTURED: the
+/// bytes were captured, the MEANING is the header's and libmdr's.
 fn decode_table_two(message: &Message) -> Option<Reading> {
     match message.command.to_byte() {
         // RET, and NTFY canonicalised onto it by the same arithmetic table 1
@@ -1343,8 +1412,89 @@ fn decode_table_two(message: &Message) -> Option<Reading> {
         // volunteered one: a second phone connects and the headset says so
         // without being asked.
         0x37 | 0x39 => decode_paired_devices(message),
+        // PERI_RET_STATUS and PERI_NTFY_STATUS: `PeripheralNotifyStatus
+        // ParingDeviceManagementCommon` (T2:1685) and its RET twin (T2:1774)
+        // are field-identical, and libmdr reads both the same way.
+        0x33 | 0x35 => decode_pairing_mode(message),
+        // RET only. Table 2 declares no VOICE_GUIDANCE_NTFY_PARAM and no
+        // SAFE_LISTENING_NTFY_EXTENDED_PARAM, so there is no twin to accept.
+        0x47 => decode_voice_guidance(message),
+        0x5B => decode_safe_listening(message),
         _ => None,
     }
+}
+
+/// `VoiceGuidanceRetParam*` (T2:4071-4125): the spoken prompts.
+///
+/// Read by `(type, length)`, the way every table-1 decoder here is:
+///
+///   (0x00..=0x02, 3)  `...SettingMtk`: the switch alone.
+///   (0x01|0x02, 4)    `...SupportLangSwitchAndSupportLangSwitch`: the switch,
+///                     then the language. CAPTURED BYTES: `47 01 00 01`.
+///   (0x03, 3)         `...SettingOnOff`, pinned: the switch alone.
+///   (0x20, 3)         `...Volume`: an `Int8`, `CODEGEN Range -2 2`. CAPTURED
+///                     BYTES: `47 20 00`. Out of range is not read.
+///
+/// The switch is `OnOffSettingValue`, INVERTED: 0x00 is on.
+fn decode_voice_guidance(message: &Message) -> Option<Reading> {
+    let kind = message.kind?;
+    let mut report = VoiceGuidanceReport::default();
+    match (kind, message.len) {
+        (0x00..=0x03, 3) | (0x01 | 0x02, 4) => {
+            report.enabled = Some(Switch::from_on_off_setting(*message.body.first()?));
+            if message.len == 4 {
+                report.language = Some(*message.body.get(1)?);
+            }
+        }
+        (0x20, 3) => {
+            let volume = i8::from_ne_bytes([*message.body.first()?]);
+            if !(-2..=2).contains(&volume) {
+                return None;
+            }
+            report.volume = Some(volume);
+        }
+        _ => return None,
+    }
+    Some(Reading::VoiceGuidance(report))
+}
+
+/// `SafeListeningRetExtendedParam` (T2:2398): the sound-pressure figure and
+/// why it might not mean anything. CAPTURED BYTES: `5b 03 ff 00`.
+///
+/// Four bytes at any of the four safe-listening types -- the struct's type is
+/// `Ignore`, and libmdr asks at whichever one the table advertises and reads
+/// every reply as this struct (`HeadphonesV2.cpp:274-292`,
+/// `HeadphonesV2T2.cpp:217-222`). 0x04 and 0x05 are SAFE_VOLUME_CONTROL and
+/// MAX_VOL_LV_LIMIT, other settings with no capture, and are not read.
+fn decode_safe_listening(message: &Message) -> Option<Reading> {
+    if message.kind? > 0x03 || message.len != 4 {
+        return None;
+    }
+    Some(Reading::SafeListening(SafeListeningReport {
+        level: *message.body.first()?,
+        cause: *message.body.get(1)?,
+    }))
+}
+
+/// `PeripheralRetStatusPairingDeviceManagementCommon` (T2:1774) at
+/// PAIRING_DEVICE_MANAGEMENT_WITH_BLUETOOTH_CLASS_OF_DEVICE: whether the
+/// headset is discoverable for pairing. CAPTURED BYTES: `33 02 00 00` --
+/// NORMAL_MODE, ENABLE, so not pairing.
+///
+/// Only 0x02, the type the captured family answers at and libmdr reads
+/// (`HeadphonesV2T2.cpp:61-75`). A byte either enum does not name is not read:
+/// "not pairing" would be a claim the headset did not make.
+fn decode_pairing_mode(message: &Message) -> Option<Reading> {
+    if message.kind? != 0x02 || message.len != 4 {
+        return None;
+    }
+    let inquiry_scan = match *message.body.first()? {
+        0x00 => false,
+        0x01 => true,
+        _ => return None,
+    };
+    let enabled = Switch::from_enable_disable(*message.body.get(1)?).as_bool()?;
+    Some(Reading::PairingMode { on: inquiry_scan && enabled })
 }
 
 /// `PeripheralRetParam` at PAIRING_DEVICE_MANAGEMENT: who else this headset
@@ -2243,6 +2393,13 @@ pub const OTHER_GROUNDS: &[(Key, Grounds, &str)] = &[
         Grounds::ReferenceClient,
         "libmdr HeadphonesV2T1.cpp HandleAudioParamT1, CONNECTION_MODE as AudioRetParamConnection",
     ),
+    // Table 2, plan 23 item 11. The corpus holds the bytes of all four; what
+    // they mean is the header's types and libmdr's reading of them. See
+    // `decode_table_two`.
+    ((T2, 0x33, 0x02), Grounds::ReferenceClient, "libmdr HeadphonesV2T2.cpp HandlePeripheralStatusT2"),
+    ((T2, 0x47, 0x01), Grounds::ReferenceClient, "libmdr HeadphonesV2T2.cpp HandleVoiceGuidanceParamT2"),
+    ((T2, 0x47, 0x20), Grounds::ReferenceClient, "libmdr HeadphonesV2T2.cpp HandleVoiceGuidanceParamT2, VOLUME"),
+    ((T2, 0x5B, 0x03), Grounds::ReferenceClient, "libmdr HeadphonesV2T2.cpp HandleSafeListeningExtendedParamT2"),
 ];
 
 /// The grounds a decoded frame stands on, or `None` when nothing decodes it.

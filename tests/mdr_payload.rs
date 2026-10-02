@@ -603,12 +603,13 @@ fn every_capture_decodes_to_something_rather_than_panicking() {
     // Then 18 -> 19 when table-two paired devices (fixture 000077) was added.
     // Then 19 -> 21 for plan 23: the play status (000065), read only where its
     // two structs agree, and the upscaling status (000097), read the way the
-    // reference client reads it.
-    assert_eq!(decoded, 21, "captures this port currently understands");
+    // reference client reads it. Then 21 -> 25 for item 11: table 2's voice
+    // guidance switch and volume, safe-listening figure and pairing status.
+    assert_eq!(decoded, 25, "captures this port currently understands");
     // The one frame a real device sent onto an ambiguous key is now read on
     // the half both structs agree on; see below.
     assert_eq!(ambiguous, 0);
-    assert_eq!(unhandled, 49);
+    assert_eq!(unhandled, 45);
 }
 
 #[test]
@@ -1120,4 +1121,78 @@ fn the_connection_mode_is_read_at_both_of_its_types_and_no_other() {
     // And the DSEE param reply at UPSCALING is still DSEE: the type, not the
     // command, separates the two.
     assert!(matches!(payload::decode(MDR, &[0xE7, 0x01, 0x01]), Reading::Dsee(_)));
+}
+
+#[test]
+fn table_two_voice_guidance_safe_listening_and_pairing_read_as_the_reference_client_reads_them() {
+    // PLAN 23, ITEM 11. The bytes are the corpus's; the meaning is the
+    // header's types and libmdr's reading of them, so the grounds say
+    // reference-client and not captured.
+    const T2: DataType = DataType::DataMdrNo2;
+    use payload::{SafeListeningReport, VoiceGuidanceReport};
+
+    // Voice guidance at 0x01: OnOffSettingValue, INVERTED, then the language.
+    let vg = payloads_for("VOICE_GUIDANCE_RET_PARAM");
+    assert!(vg.contains(&vec![0x47, 0x01, 0x00, 0x01]), "{vg:02x?}");
+    assert_eq!(
+        payload::decode(T2, &[0x47, 0x01, 0x00, 0x01]),
+        Reading::VoiceGuidance(VoiceGuidanceReport { enabled: Some(Switch::On), language: Some(0x01), volume: None })
+    );
+    assert_eq!(payload::voice_guidance_language(0x01), "english");
+    assert_eq!(payload::voice_guidance_language(0xF0), "chinese");
+    assert_eq!(payload::voice_guidance_language(0x0C), "unknown", "0x0C is a hole in the enum");
+    // 0x01 in the switch is OFF -- the trap the old refusal was about.
+    match payload::decode(T2, &[0x47, 0x01, 0x01, 0x0B]) {
+        Reading::VoiceGuidance(r) => assert_eq!(r.enabled, Some(Switch::Off)),
+        other => panic!("decoded as {other:?}"),
+    }
+    // The three-byte forms carry the switch alone, at 0x00..=0x03.
+    for kind in 0x00u8..=0x03 {
+        match payload::decode(T2, &[0x47, kind, 0x00]) {
+            Reading::VoiceGuidance(r) => assert_eq!((r.enabled, r.language), (Some(Switch::On), None)),
+            other => panic!("0x{kind:02x} decoded as {other:?}"),
+        }
+    }
+
+    // The volume: an Int8 bounded -2..=2 by the header, zero centred.
+    assert!(vg.contains(&vec![0x47, 0x20, 0x00]), "{vg:02x?}");
+    for (byte, want) in [(0x00u8, 0i8), (0x02, 2), (0xFE, -2), (0xFF, -1)] {
+        match payload::decode(T2, &[0x47, 0x20, byte]) {
+            Reading::VoiceGuidance(r) => assert_eq!(r.volume, Some(want), "{byte:#04x}"),
+            other => panic!("{byte:#04x} decoded as {other:?}"),
+        }
+    }
+    for byte in [0x03u8, 0x7F, 0x80, 0xFD] {
+        assert!(matches!(payload::decode(T2, &[0x47, 0x20, byte]), Reading::Unhandled { .. }), "{byte:#04x}");
+    }
+
+    // Safe listening: raw, both bytes, at the four safe-listening types only.
+    let sl = payloads_for("SAFE_LISTENING_RET_EXTENDED_PARAM");
+    assert_eq!(sl, vec![vec![0x5B, 0x03, 0xFF, 0x00]]);
+    let want = SafeListeningReport { level: 0xFF, cause: 0x00 };
+    assert_eq!(payload::decode(T2, &sl[0]), Reading::SafeListening(want));
+    assert_eq!(want.cause_word(), "not_playing");
+    assert!(matches!(payload::decode(T2, &[0x5B, 0x04, 0x00, 0x00]), Reading::Unhandled { .. }));
+
+    // Pairing mode: INQUIRY_SCAN and ENABLE, both, and nothing else.
+    let peri = payloads_for("PERI_RET_STATUS");
+    assert_eq!(peri, vec![vec![0x33, 0x02, 0x00, 0x00]]);
+    assert_eq!(payload::decode(T2, &peri[0]), Reading::PairingMode { on: false });
+    assert_eq!(payload::decode(T2, &[0x33, 0x02, 0x01, 0x00]), Reading::PairingMode { on: true });
+    assert_eq!(payload::decode(T2, &[0x35, 0x02, 0x01, 0x00]), Reading::PairingMode { on: true }, "NTFY");
+    assert_eq!(payload::decode(T2, &[0x33, 0x02, 0x01, 0x01]), Reading::PairingMode { on: false });
+    assert!(matches!(payload::decode(T2, &[0x33, 0x02, 0x02, 0x00]), Reading::Unhandled { .. }));
+    assert!(matches!(payload::decode(T2, &[0x33, 0x02, 0x01, 0x07]), Reading::Unhandled { .. }));
+
+    for bytes in [&[0x47u8, 0x01, 0x00, 0x01][..], &[0x47, 0x20, 0x00], &[0x5B, 0x03, 0xFF, 0x00], &[0x33, 0x02, 0x00, 0x00]] {
+        assert_eq!(payload::grounds(T2, bytes), Some(payload::Grounds::ReferenceClient), "{bytes:02x?}");
+        // TABLE ONE IS ANOTHER NAMESPACE: the same bytes there are not these.
+        assert!(
+            !matches!(
+                payload::decode(MDR, bytes),
+                Reading::VoiceGuidance(_) | Reading::SafeListening(_) | Reading::PairingMode { .. }
+            ),
+            "{bytes:02x?} on table 1"
+        );
+    }
 }
