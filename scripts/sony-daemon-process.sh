@@ -3,6 +3,8 @@
 # The qs-sonyd process: start it, stop it, say whether it is up.
 #
 #   sony-daemon-process start     start it unless it is already running
+#   sony-daemon-process start --alerts
+#                                 the same, with the headset's confirmations on
 #   sony-daemon-process stop      stop it, and remove the document it left
 #   sony-daemon-process running   exit 0 if it is running, 1 if not
 #   sony-daemon-process --json    {installed, running, log}, for a settings page
@@ -67,7 +69,17 @@ installed() { [[ -x "$DAEMON" ]]; }
 # not ours to see and emphatically not ours to kill.
 running() { pgrep -u "$(id -u)" -f -- "$PATTERN" >/dev/null 2>&1; }
 
+# --alerts is passed through to the daemon and is the only argument start
+# takes. Alerts are a capture-session switch (qs-sonyd's encode::alerts_on
+# says why they are off by default), so an unknown word here is refused rather
+# than handed to the daemon to refuse after it has detached.
 start_it() {
+    local extra=()
+    case "${1:-}" in
+        "") ;;
+        --alerts) extra=(--alerts) ;;
+        *) echo "start takes only --alerts, not $1" >&2; return 2 ;;
+    esac
     installed || { echo "no daemon at $DAEMON" >&2; return 1; }
     running && { echo "already running"; return 0; }
     mkdir -p "$LOG_DIR" 2>/dev/null || { echo "cannot create $LOG_DIR" >&2; return 1; }
@@ -77,7 +89,7 @@ start_it() {
     # setsid -f so it survives the shell that started it -- a settings page
     # launches this through a process that exits immediately. The daemon writes
     # nothing to stdout; stderr is its notes, so that one goes to the log.
-    setsid -f "$DAEMON" >/dev/null 2>"$LOG"
+    setsid -f "$DAEMON" "${extra[@]}" >/dev/null 2>"$LOG"
     echo "started"
 }
 
@@ -98,7 +110,7 @@ stop_it() {
 
 case "${1:-}" in
     start)
-        start_it
+        start_it "${2:-}"
         ;;
     stop)
         stop_it
@@ -115,7 +127,7 @@ case "${1:-}" in
             '{installed: $installed, running: $running, log: $log}'
         ;;
     *)
-        echo "usage: sony-daemon-process start|stop|running|--json" >&2
+        echo "usage: sony-daemon-process start [--alerts]|stop|running|--json" >&2
         exit 2
         ;;
 esac

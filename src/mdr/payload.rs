@@ -114,6 +114,10 @@ pub enum Command {
     GsRetParam,
     /// `GENERAL_SETTING_NTFY_PARAM` (0xD9), the same body volunteered.
     GsNtfyParam,
+    /// `ALERT_NTFY_PARAM` (0x99): the headset asking the person something.
+    /// Volunteered only, and only after `ALERT_SET_STATUS` enabled it; there
+    /// is no GET or RET in this family's PARAM half.
+    AlertNtfyParam,
     /// A command byte this port does not model.
     Other(u8),
 }
@@ -153,6 +157,7 @@ impl Command {
             0xD1 => Command::GsRetCapability,
             0xD7 => Command::GsRetParam,
             0xD9 => Command::GsNtfyParam,
+            0x99 => Command::AlertNtfyParam,
             other => Command::Other(other),
         }
     }
@@ -191,6 +196,7 @@ impl Command {
             Command::GsRetCapability => 0xD1,
             Command::GsRetParam => 0xD7,
             Command::GsNtfyParam => 0xD9,
+            Command::AlertNtfyParam => 0x99,
             Command::Other(byte) => byte,
         }
     }
@@ -1166,6 +1172,10 @@ pub enum Reading {
     /// Whether the headset is discoverable for pairing. TABLE TWO -- see
     /// [`decode_pairing_mode`].
     PairingMode { on: bool },
+    /// The headset asking for a confirmation, at FIXED_MESSAGE: what about,
+    /// and what kind of answer it wants. Both bytes raw; see
+    /// [`decode_alert`].
+    Alert { message: u8, action: u8 },
     /// Every device this headset is paired with, and which of them it is
     /// talking to. TABLE TWO -- see [`decode_paired_devices`].
     ///
@@ -1357,6 +1367,7 @@ pub fn decode(data_type: super::DataType, payload: &[u8]) -> Reading {
         }
         .unwrap_or(unhandled),
         Command::AudioRetStatus => decode_upscaling_status(&message).unwrap_or(unhandled),
+        Command::AlertNtfyParam => decode_alert(&message).unwrap_or(unhandled),
         // Same shape again: the param reply carries the switches and the
         // extended param reply carries the sensitivity and the timeout.
         Command::SystemRetParam | Command::SystemRetExtParam => {
@@ -1730,6 +1741,163 @@ fn decode_play_status(message: &Message) -> Option<Reading> {
     let control = Switch::from_enable_disable(*message.body.first()?);
     let status = PlaybackStatus::from_byte(*message.body.get(1)?);
     Some(Reading::PlayStatus(PlayStatusReport { control, status }))
+}
+
+/// `AlertNotifyParamFixedMessage` (T1:2080): the headset asking something.
+///
+/// `99 00 <AlertMessageType> <AlertActionType>`. HEADER ONLY for the layout --
+/// the type is pinned, both value fields are `Ignore` -- and REFERENCE CLIENT
+/// for the reading: libmdr deserializes exactly this when a headset
+/// advertises FIXED_MESSAGE (t1 0x90) and treats POSITIVE_NEGATIVE as a
+/// question to put to the person (`HeadphonesV2T1.cpp:918-940`). No capture
+/// holds one: the recording app never enabled alerts.
+///
+/// Both bytes are carried raw. [`alert_message_name`] and
+/// [`alert_action_word`] name them where the document is written, because a
+/// message type this port has no name for is still a question the headset is
+/// waiting on.
+fn decode_alert(message: &Message) -> Option<Reading> {
+    if message.kind? != 0x00 || message.len != 4 {
+        return None;
+    }
+    Some(Reading::Alert { message: *message.body.first()?, action: *message.body.get(1)? })
+}
+
+/// `AlertMessageType` (T1:98-207), transcribed whole. What the headset is
+/// asking about.
+const ALERT_MESSAGES: &[(u8, &str)] = &[
+    (0x00, "DISCONNECT_CAUSED_BY_CONNECTION_MODE_CHANGE"),
+    (0x01, "DISCONNECT_CAUSED_BY_CHANGING_KEY_ASSIGN"),
+    (0x02, "NEED_DISCONNECTION_FOR_UPDATING_FIRMWARE"),
+    (0x03, "GOOGLE_ASSISTANT_IS_NOW_AVAILABLE"),
+    (0x05, "DUAL_ASSIGN_OF_VOICE_ASSISTANT_IS_UNAVAILABLE"),
+    (0x06, "DISCONNECT_CAUSED_BY_CHANGING_MULTIPOINT_LDAC_DISABLE"),
+    (0x07, "DISCONNECT_CAUSED_BY_CHANGING_MULTIPOINT"),
+    (0x08, "BATTERY_CONSUMPTION_INCREASE_DUE_TO_EQ_AND_UPSCALING"),
+    (0x09, "CAUTION_FOR_DUAL_ASSIGNMENT_OF_PLAYBACK_CONTROL"),
+    (0x0A, "CAUTION_FOR_DISABLE_TOUCH_SENSOR_PANEL"),
+    (0x0B, "CAUTION_FOR_DISABLE_TOUCH_SENSOR_PANEL_AND_RECONNECTION"),
+    (0x0C, "CAUTION_FOR_ABLE_TOUCH_SENSOR_PANEL"),
+    (0x0D, "CAUTION_FOR_ABLE_TOUCH_SENSOR_PANEL_AND_RECONNECTION"),
+    (0x0E, "CAUTION_FOR_DISABLE_VOICE_ASSISTANT_ASSIGNABLE_BUTTON"),
+    (0x0F, "CAUTION_FOR_DISABLE_VOICE_ASSISTANT_ASSIGNABLE_SENSOR"),
+    (0x10, "CAUTION_FOR_DISABLE_VOICE_ASSISTANT_AND_RECONNECTION_ASSIGNABLE_BUTTON"),
+    (0x11, "CAUTION_FOR_DISABLE_VOICE_ASSISTANT_AND_RECONNECTION_ASSIGNABLE_SENSOR"),
+    (0x12, "CAUTION_FOR_ABLE_VOICE_ASSISTANT_ASSIGNABLE_BUTTON"),
+    (0x13, "CAUTION_FOR_ABLE_VOICE_ASSISTANT_ASSIGNABLE_SENSOR"),
+    (0x14, "CAUTION_FOR_ABLE_VOICE_ASSISTANT_AND_RECONNECTION_ASSIGNABLE_BUTTON"),
+    (0x15, "CAUTION_FOR_ABLE_VOICE_ASSISTANT_AND_RECONNECTION_ASSIGNABLE_SENSOR"),
+    (0x16, "CAUTION_FOR_CHANGE_VOICE_ASSISTANT"),
+    (0x17, "CAUTION_FOR_CHANGE_VOICE_ASSISTANT_TOUCH_SENSOR_PANEL"),
+    (0x18, "CAUTION_FOR_CHANGE_VOICE_ASSISTANT_TOUCH_SENSOR_PANEL_MOBILE_OR_SIRI"),
+    (0x19, "FOREGROUND_CAUTION_NEED_DISCONNECTION_FOR_ENABLING_WAKE_WORD"),
+    (0x1A, "FOREGROUND_CAUTION_WAKE_WORD_IS_AVAILABLE_ONLY_IN_USE_OF_ALEXA"),
+    (0x1B, "CAUTION_FOR_NOT_CONNECTED_COMPASS_MOUNTING_SIDE_RIGHT"),
+    (0x1C, "CAUTION_FOR_CONNECTION_MODE_SOUND_QUALITY_PRIOR"),
+    (0x1D, "CAUTION_FOR_FW_UPDATE_IN_PROGRESS"),
+    (0x1E, "CAUTION_FOR_DISABLE_SAR_GM1"),
+    (0x1F, "CAUTION_FOR_GATT_DISCONNECTION_FOR_SAR"),
+    (0x20, "CAUTION_FOR_GATT_TO_ON"),
+    (0x21, "CANT_ASSIGN_MS_AND_GOOGLE_ASSISTANT_AT_THE_SAME_TIME"),
+    (0x22, "CAUTION_FOR_GATT_FOR_MS"),
+    (0x23, "CAUTION_FOR_GATT_FOR_QUICK_ACCESS_SERVICE"),
+    (0x24, "DISCONNECT_CAUSED_BY_GATT_ON"),
+    (0x25, "DISCONNECT_AND_CHANGE_KEY_ASSIGN_CAUSED_BY_GATT_ON"),
+    (0x26, "DISCONNECT_CAUSED_BY_CHANGING_KEY_ASSIGN_AND_CHANGE_GATT_TO_OFF"),
+    (0x27, "DISCONNECT_CAUSED_BY_CHANGING_VOICE_ASSISTANT_AND_CHANGE_GATT_TO_OFF"),
+    (0x28, "DISCONNECT_AND_CHANGE_VOICE_ASSISTANT_TO_SIRI_CAUSED_BY_GATT_ON"),
+    (0x29, "CANT_USE_LDAC_WHILE_GATT_IS_ON"),
+    (0x2A, "CANT_USE_LDAC_IN_SOUND_QUALITY_PRIOR"),
+    (0x2B, "BATTERY_CONSUMPTION_INCREASE_DUE_TO_SOUND_FUNCTION_1"),
+    (0x2C, "DISCONNECT_CAUSED_BY_CHANGING_CONNECTION_STANDBY_MODE_CLASSIC_ONLY"),
+    (0x2D, "DISCONNECT_CAUSED_BY_CHANGING_CONNECTION_STANDBY_MODE_LE_AUDIO_CLASSIC"),
+    (0x2E, "DISCONNECT_CAUSED_BY_ENTER_PAIRING_MODE_CLASSIC"),
+    (0x2F, "DISCONNECT_CAUSED_BY_ENTER_PAIRING_MODE_WITH_FOLLOWING_FOR_LE_AUDIO_LIMITATION_VAS_CONNECTION_MODE"),
+    (0x30, "DISCONNECT_CAUSED_BY_CHANGE_CONNECTION_CLASSIC"),
+    (0x31, "DISCONNECT_CAUSED_BY_CHANGE_CONNECTION_WITH_FOLLOWING_FOR_LE_AUDIO_LIMITATION_VAS_CONNECTION_MODE"),
+    (0x32, "BISTO_LCH_ASSIGNMENT_AND_GATT_ACTIVATION_IS_IMPOSSIBLE"),
+    (0x33, "TEAMS_MUST_BE_ASSIGNED_TO_EITHER_LEFT_OR_RIGHT"),
+    (0x34, "DISCONNECT_CAUSED_BY_ENTER_PAIRING_MODE_WITH_FOLLOWING_FOR_LE_AUDIO_LIMITATION_ASSIGNABLE_SETTINGS_VA_QA_CONNECTION_MODE_QA"),
+    (0x35, "DISCONNECT_CAUSED_BY_CHANGE_CONNECTION_WITH_FOLLOWING_FOR_LE_AUDIO_LIMITATION_ASSIGNABLE_SETTINGS_VA_QA_CONNECTION_MODE_QA"),
+    (0x36, "DISCONNECT_CAUSED_BY_ENTER_PAIRING_MODE_WITH_FOLLOWING_FOR_LE_AUDIO_LIMITATION_VAS_CONNECTION_MODE_PDM"),
+    (0x37, "DISCONNECT_CAUSED_BY_CHANGE_CONNECTION_WITH_FOLLOWING_FOR_LE_AUDIO_LIMITATION_VAS_CONNECTION_MODE_PDM"),
+    (0x38, "DISCONNECT_CAUSED_BY_ENTER_PAIRING_MODE_WITH_FOLLOWING_FOR_LE_AUDIO_LIMITATION_VAS_CONNECTION_MODE_QA"),
+    (0x39, "DISCONNECT_CAUSED_BY_CHANGE_CONNECTION_WITH_FOLLOWING_FOR_LE_AUDIO_LIMITATION_VAS_CONNECTION_MODE_QA"),
+    (0x40, "DISCONNECT_CAUSED_BY_ENTER_PAIRING_MODE_WITH_FOLLOWING_FOR_LE_AUDIO_LIMITATION_VAS_CONNECTION_MODE_QA_PDM"),
+    (0x41, "DISCONNECT_CAUSED_BY_CHANGE_CONNECTION_WITH_FOLLOWING_FOR_LE_AUDIO_LIMITATION_VAS_CONNECTION_MODE_QA_PDM"),
+    (0x50, "CANT_USE_LDAC_WHILE_GATT_IS_ON_NO_RIGHT_SIDE_LIMITATION"),
+    (0x51, "CAUTION_FOR_CHANGING_VOICE_ASSISTANT_TO_SIRI"),
+    (0x52, "CAUTION_FOR_GATT_TO_OFF_CAUSED_BY_CHANGING_VOICE_ASSISTANT"),
+    (0x53, "CAUTION_FOR_LDAC_990"),
+    (0x54, "CAUTION_FOR_GATT_TO_ON_FOR_QA_EASY_SETTING"),
+    (0x55, "CAUTION_FOR_FW_UPDATE_IN_PROGRESS_FOR_QA_EASY_SETTING"),
+    (0x56, "DISCONNECT_CAUSED_BY_GATT_ON_FOR_EASY_SETTING"),
+    (0x57, "DISCONNECT_AND_CHANGE_KEY_ASSIGN_CAUSED_BY_GATT_ON_FOR_QA_EASY_SETTING"),
+    (0x58, "DISCONNECT_AND_CHANGE_VOICE_ASSISTANT_TO_SIRI_CAUSED_BY_GATT_ON_FOR_QA_EASY_SETTING"),
+    (0x59, "CAUTION_FOR_AUTO_VOLUME_OPTIMIZER_TO_ON"),
+    (0x5A, "CAUTION_FOR_AUTO_VOLUME_TO_ON_SVC_IS_ON"),
+    (0x5B, "CAUTION_FOR_AUTO_VOLUME_TO_ON_SVC_VOLUME_LIMITATION_IS_ON"),
+    (0x5C, "CAUTION_FOR_EXCLUSIVE_EQ_CHANGING_AND_BGM_MODE"),
+    (0x5D, "CAUTION_FOR_CHANGE_KEY_ASSIGN_TO_OTHER_VOICE_ASSISTANT"),
+    (0x5E, "CAUTION_FOR_CHANGE_KEY_ASSIGN_TO_PLAYBACK_CONTROL_L"),
+    (0x5F, "CAUTION_FOR_CHANGE_KEY_ASSIGN_TO_PLAYBACK_CONTROL_R"),
+    (0x60, "CAUTION_FOR_CHANGE_KEY_ASSIGN_TO_NC_ASM_QUICK_ACCESS_L"),
+    (0x61, "CAUTION_FOR_CHANGE_KEY_ASSIGN_TO_NC_ASM_QUICK_ACCESS_R"),
+    (0x62, "CAUTION_FOR_CHANGE_KEY_ASSIGN_TO_VOICE_ASSISTANT_TO_NOT_SVA"),
+    (0x63, "CAUTION_FOR_CAN_USE_GOOGLE_HOT_WORD"),
+    (0x64, "CAUTION_FOR_CALLING_WHEN_SVA_TRAINING"),
+    (0x65, "CAUTION_FOR_CHANGE_KEY_ASSIGN_TO_BE_ENABLE_REPEAT_TAP"),
+    (0x66, "CAUTION_FOR_CHANGE_KEY_ASSIGN_TO_BE_DISABLE_REPEAT_TAP"),
+    (0x67, "CAUTION_FOR_CHANGE_HEART_RATE_PROFILE_TO_ON"),
+    (0x68, "CAUTION_FOR_CHANGE_HEART_RATE_SENSOR_GREEN_LIGHT_TO_OFF"),
+    (0x70, "CAUTION_FOR_ENABLING_2_DEVICES_CONNECTION_WITH_LDAC"),
+    (0x71, "CAUTION_FOR_CHANGING_TO_QUALITY_PRIOR_CONNECTION_MODE_WITH_2_DEVICES_CONNECTION"),
+    (0x72, "CAUTION_FOR_CONNECTED_2_DEVICES_IN_BACKGROUND_WITH_LDAC"),
+    (0x73, "WARNING_FOR_CHANGING_TO_LDAC_990_WITH_2_DEVICES_CONNECTION"),
+    (0x74, "DISCONNECT_CAUSED_BY_CHANGE_CLASSIC_AUDIO_SOUND_QUALITY_PRIOR_FROM_LE_AUDIO"),
+    (0x75, "DISCONNECT_CAUSED_BY_CHANGE_CLASSIC_AUDIO_CONNECTION_QUALITY_PRIOR_FROM_LE_AUDIO"),
+    (0x76, "DISCONNECT_CAUSED_BY_CHANGE_CLASSIC_AUDIO_SOUND_QUALITY_PRIOR"),
+    (0x77, "DISCONNECT_CAUSED_BY_CHANGE_CLASSIC_AUDIO_CONNECTION_QUALITY_PRIOR"),
+    (0x80, "CAUTION_FOR_TV_SOUND_BOOSTER_SETTING_ON"),
+    (0x81, "CAUTION_FOR_TV_SOUND_BOOSTER_SETTING_OFF"),
+    (0x82, "CAUTION_FOR_SETTINGS_STAMINA_FROM_ON_TO_OFF"),
+    (0x83, "CAUTION_FOR_SETTINGS_STAMINA_FROM_ON_TO_OFF_NO_LIGHTING_MODE"),
+    (0x84, "CAUTION_FOR_SETTINGS_STAMINA_FROM_OFF_TO_ON"),
+    (0x85, "CAUTION_FOR_SETTINGS_STAMINA_FROM_OFF_TO_ON_NO_LIGHTING_MODE"),
+    (0x86, "CAUTION_FOR_SETTINGS_SOUND_EFFECT_ON_STAMINA_ON"),
+    (0x87, "CAUTION_FOR_SETTINGS_SOUND_EFFECT_ON_STAMINA_ON_NO_LIGHTING"),
+    (0x88, "CAUTION_FOR_SETTINGS_LIGHTING_MODE_ON_WHEN_STAMINA_ON"),
+    (0x90, "CAUTION_FOR_DIABLING_BGM_MODE"),
+    (0x91, "CAUTION_FOR_USB_SUBMERSION_MONITOR_DURING_NOT_CHARGING"),
+    (0x92, "CAUTION_FOR_USB_SUBMERSION_MONITOR_DURING_CASE_IN"),
+    (0x93, "TURN_KEY_EQ_SUCCESS"),
+    (0x94, "CAUTION_FOR_USB_OVERHEAT_DETECTION_DURING_NOT_CHARGING"),
+    (0x95, "CAUTION_FOR_USB_OVERHEAT_DETECTION_DURING_CASE_IN"),
+];
+
+/// The header's name for an `AlertMessageType`, or `None` for a byte it does
+/// not declare.
+pub fn alert_message_name(byte: u8) -> Option<&'static str> {
+    ALERT_MESSAGES.iter().find(|(b, _)| *b == byte).map(|(_, name)| *name)
+}
+
+/// Whether answering yes to this alert makes the headset drop the link: every
+/// `DISCONNECT_*` message, and `NEED_DISCONNECTION_FOR_UPDATING_FIRMWARE`.
+/// By name, because the names are the only statement of it the reference
+/// makes.
+pub fn alert_disconnects(byte: u8) -> bool {
+    alert_message_name(byte).is_some_and(|n| n.starts_with("DISCONNECT_") || n.starts_with("NEED_DISCONNECTION_"))
+}
+
+/// `AlertActionType` (T1:47-53) as a lowercase word: what kind of answer the
+/// headset wants.
+pub fn alert_action_word(byte: u8) -> &'static str {
+    match byte {
+        0x00 => "confirmation_only",
+        0x01 => "positive_negative",
+        0x02 => "positive_confirmation_with_reply",
+        _ => "unknown",
+    }
 }
 
 /// `SystemRetParamSmartTalking` and `SystemRetExtParamSmartTalkingModeType2`.
@@ -2393,6 +2561,8 @@ pub const OTHER_GROUNDS: &[(Key, Grounds, &str)] = &[
         Grounds::ReferenceClient,
         "libmdr HeadphonesV2T1.cpp HandleAudioParamT1, CONNECTION_MODE as AudioRetParamConnection",
     ),
+    // Plan 23 item 14. No capture: the recording app never enabled alerts.
+    ((T1, 0x99, 0x00), Grounds::ReferenceClient, "libmdr HeadphonesV2T1.cpp HandleAlertParamT1, FIXED_MESSAGE"),
     // Table 2, plan 23 item 11. The corpus holds the bytes of all four; what
     // they mean is the header's types and libmdr's reading of them. See
     // `decode_table_two`.

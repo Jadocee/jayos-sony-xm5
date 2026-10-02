@@ -112,6 +112,10 @@ pub enum Command {
     Volume(i32),
     /// `play`, `pause`, `next` or `previous`.
     Playback(String),
+    /// The answer to the question the headset is asking: yes or no. This
+    /// daemon's own verb -- the C++ daemon has no alerts -- and only ever sent
+    /// by a page that is showing the question. Plan 23, item 14.
+    Alert(bool),
 }
 
 /// The largest command line accepted, per the spec.
@@ -306,6 +310,15 @@ pub fn parse_words(words: &[&str]) -> Result<Command, String> {
             _ => Err("playback must be play, pause, next, or previous".to_string()),
         },
 
+        // YES AND NO, NOT ON AND OFF. The headset asked a question --
+        // "switching multipoint will disconnect, continue?" -- and the answer
+        // is AlertAction's POSITIVE or NEGATIVE, not a setting's state.
+        ("alert", 2) => match arg {
+            "yes" => Ok(Command::Alert(true)),
+            "no" => Ok(Command::Alert(false)),
+            _ => Err("alert must be yes or no".to_string()),
+        },
+
         _ => Err("invalid command or argument count".to_string()),
     }
 }
@@ -349,6 +362,7 @@ pub const GRAMMAR: &[Form] = &[
         form: "playback play|pause|next|previous",
         examples: &["playback play", "playback pause", "playback next", "playback previous"],
     },
+    Form { form: "alert yes|no", examples: &["alert yes", "alert no"] },
 ];
 
 /// The verb list, for `--help` and for a rejected command.
@@ -362,5 +376,6 @@ pub fn usage() -> &'static str {
         "  general <setting> on|off\n",
         "  connection quality|stable\n",
         "  volume 0..100\n  playback play|pause|next|previous\n",
+        "  alert yes|no\n",
     )
 }

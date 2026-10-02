@@ -263,6 +263,14 @@ pub struct Session {
     /// the link's remaining input is ignored until [`Session::link_down`] or
     /// [`Session::link_up`] closes the window.
     hanging_up: bool,
+    /// `qs-sonyd --alerts`: ask the headset to put its confirmations to us.
+    /// Off by default -- see [`encode::alerts_on`] for why that is the
+    /// person's decision.
+    alerts: bool,
+    /// A yes was just given to an alert whose message says the headset will
+    /// drop the link. The drop that follows is the headset doing what it was
+    /// told, and is published as a clean close rather than as an error.
+    expect_drop: bool,
 }
 
 impl Session {
@@ -287,7 +295,16 @@ impl Session {
             want_feature_gets: false,
             asked_feature_gets: false,
             hanging_up: false,
+            alerts: false,
+            expect_drop: false,
         }
+    }
+
+    /// The same session, asking the headset for its alerts once it has said
+    /// it has them. Plan 23, item 14.
+    pub fn with_alerts(mut self, on: bool) -> Session {
+        self.alerts = on;
+        self
     }
 
     /// The document as it now stands: `state::serialize`'s output, unchanged,
@@ -363,6 +380,7 @@ impl Session {
         self.want_feature_gets = false;
         self.asked_feature_gets = false;
         self.hanging_up = false;
+        self.expect_drop = false;
         self.tx_seq = 0;
 
         self.state.device.name = peer.name;
@@ -383,6 +401,10 @@ impl Session {
         let hung_up_for = self.state.last_error.clone();
         self.forget();
         self.hanging_up = false;
+        // ASKED FOR, SO NOT A FAULT. However the transport saw it, a link
+        // that drops right after the person said yes to "this will
+        // disconnect" is the headset keeping its word.
+        let why = if std::mem::take(&mut self.expect_drop) { Down::Closed } else { why };
         self.phase = match why {
             Down::Closed => Phase::Idle,
             Down::Failed(reason) => {
@@ -609,6 +631,27 @@ impl Session {
             return;
         }
         match encode::encode(&self.facts, &verb) {
+            // THE ANSWER JUMPS THE QUEUE AND THE CAP. The headset is holding
+            // something -- a second phone's link, a mode change -- until it
+            // hears back, and an answer queued behind a page's worth of
+            // refresh queries, or refused because they filled the outbox, is
+            // an answer that arrives after the person has given up on it.
+            Ok(outgoing) if matches!(verb, Verb::Alert(_)) => {
+                if let (Some((message, _)), Verb::Alert(yes)) = (self.facts.alert(), &verb) {
+                    self.expect_drop = *yes && payload::alert_disconnects(message);
+                }
+                self.facts.alert_answered();
+                self.state.alert = None;
+                if let Some((command, kind, _)) = outgoing.key() {
+                    out.push(Effect::Note(Note::Sent {
+                        command,
+                        kind,
+                        tier: outgoing.evidence.tier(),
+                        set: outgoing.evidence.set(),
+                    }));
+                }
+                self.outbox.push_front(Pending { out: outgoing, waiting: Some(id) });
+            }
             Ok(outgoing) => {
                 if self.outbox.len() >= self.limits.outbox {
                     out.push(Effect::Reply {
@@ -667,6 +710,11 @@ impl Session {
             self.asked_feature_gets = true;
             for query in encode::feature_gets(&self.facts) {
                 self.queue(query, None);
+            }
+            if self.alerts {
+                if let Some(enable) = encode::alerts_on(&self.facts) {
+                    self.queue(enable, None);
+                }
             }
         }
         let Some(pending) = self.outbox.pop_front() else { return };
@@ -842,6 +890,15 @@ impl Session {
                 self.state.safe_listening.cause = Some(report.cause_word().to_string());
             }
             payload::Reading::PairingMode { on } => self.state.pairing_mode = Some(*on),
+            payload::Reading::Alert { message, action } => {
+                self.state.alert = Some(state::Alert {
+                    message_type: payload::alert_message_name(*message)
+                        .map_or_else(|| "unknown".to_string(), str::to_ascii_lowercase),
+                    message_code: *message,
+                    action_type: payload::alert_action_word(*action).to_string(),
+                    disconnects: payload::alert_disconnects(*message),
+                });
+            }
             payload::Reading::UpscalingStatus { available } => {
                 // `null` stays `null` for a byte EnableDisable does not name:
                 // "the headset said something else" is not "unavailable".

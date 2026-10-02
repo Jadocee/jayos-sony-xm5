@@ -227,7 +227,15 @@ impl Outgoing {
     /// `the_command_families_are_numbered_in_fours` checks it -- so the twin
     /// is arithmetic rather than a table that could fall out of step.
     pub fn ret_twin(&self) -> Option<u8> {
-        self.command()?.checked_sub(1)
+        let command = self.command()?;
+        // ALERT_SET_PARAM (0x98) is the one SET this port sends whose family
+        // has no RET: the alert family runs 0x90..=0x95 and then 0x98/0x99,
+        // SET and NTFY, with nothing at 0x96 or 0x97. The arithmetic would
+        // name a reply that does not exist.
+        if command == 0x98 {
+            return None;
+        }
+        command.checked_sub(1)
     }
 }
 
@@ -271,6 +279,8 @@ pub enum Refusal {
     /// The headset named more than one of its settings this way, so the name
     /// does not say which slot to write.
     Collision { verb: &'static str, key: String, slots: Vec<u8> },
+    /// An answer with no question: the headset is not asking anything.
+    NotAsked { verb: &'static str },
     /// A verb with no device message behind it at all.
     NoEncoder { verb: &'static str, why: &'static str },
 }
@@ -286,7 +296,8 @@ impl Refusal {
             | Refusal::OutOfRange { .. }
             | Refusal::OutOfDeviceRange { .. }
             | Refusal::Unavailable { .. }
-            | Refusal::Collision { .. } => Side::Device,
+            | Refusal::Collision { .. }
+            | Refusal::NotAsked { .. } => Side::Device,
             // These three are this port's gaps, not the headset's.
             Refusal::Ambiguous { .. }
             | Refusal::Undocumented { .. }
@@ -334,6 +345,9 @@ impl Refusal {
             }
             Refusal::Unavailable { verb, said } => {
                 format!("{verb}: this headset says it is unavailable now -- {said}")
+            }
+            Refusal::NotAsked { verb } => {
+                format!("{verb}: this headset is not asking anything to answer")
             }
             Refusal::Collision { verb, key, slots } => {
                 let slots: Vec<String> = slots.iter().map(|s| format!("0x{s:02x}")).collect();
@@ -388,6 +402,9 @@ pub struct Facts {
     /// Whether the headset will take a transport command. See
     /// [`encode_playback`].
     play_status: Option<Observed<PlayStatusReport>>,
+    /// The question the headset is waiting on, `(message, action)`, until it
+    /// is answered. See [`encode_alert`].
+    alert: Option<(u8, u8)>,
     /// The headset's named on/off settings, by slot.
     ///
     /// KEYED BY SLOT AND NOT BY NAME, because the slot is what a GET or a SET
@@ -412,6 +429,7 @@ impl Facts {
             volume: None,
             connection: None,
             play_status: None,
+            alert: None,
             general: std::collections::BTreeMap::new(),
         }
     }
@@ -479,6 +497,9 @@ impl Facts {
             Reading::PlayStatus(report) => {
                 self.play_status = Some(Observed { kind, len: payload.len(), value: Some(report) })
             }
+            // A newer question replaces an older one: the headset asks one at
+            // a time, and an answer goes to the one it is asking now.
+            Reading::Alert { message, action } => self.alert = Some((message, action)),
             // TWO MESSAGES, ONE SLOT. The capability reply says what the
             // setting IS and the param reply says whether it is on; they arrive
             // as separate frames at the same inquired type, and a SET needs
@@ -531,6 +552,20 @@ impl Facts {
         ranges.iter().find(|r| r.voice == voice).copied()
     }
 
+    /// The question the headset is waiting on: `(AlertMessageType,
+    /// AlertActionType)`.
+    pub fn alert(&self) -> Option<(u8, u8)> {
+        self.alert
+    }
+
+    /// The person has answered, so there is no question any more. The one
+    /// mutation here that is not a reading: an answer is not something the
+    /// headset says back -- ALERT_SET_PARAM has no RET -- so nothing else
+    /// would ever clear it.
+    pub fn alert_answered(&mut self) {
+        self.alert = None;
+    }
+
     pub(crate) fn advertises_one(&self, codes: &[u8]) -> bool {
         self.table_one.iter().any(|f| codes.contains(&f.code))
     }
@@ -577,7 +612,61 @@ pub fn encode(facts: &Facts, verb: &Verb) -> Result<Outgoing, Refusal> {
         Verb::Volume(percent) => encode_volume(facts, *percent),
         Verb::Playback(word) => encode_playback(facts, word),
         Verb::ConnectionPriority(word) => encode_connection(facts, word),
+        Verb::Alert(yes) => encode_alert(facts, *yes),
     }
+}
+
+/// `AlertSetStatusFixedMessage` (T1:2291) with ENABLE: `94 00 00`, asking the
+/// headset to put its confirmations to us. `None` unless it advertises
+/// FIXED_MESSAGE (t1 0x90).
+///
+/// OFF UNLESS `qs-sonyd --alerts`, and that is the user's decision rather than
+/// an oversight. Once enabled, a headset that would otherwise act on its own
+/// -- dropping a second phone when multipoint is switched off, say -- WAITS
+/// for an answer, and a page that is closed cannot give one. So alerts are a
+/// capture-session switch until a page is known to answer them.
+///
+/// REFERENCE CLIENT: libmdr sends exactly these three bytes on every link to
+/// a headset advertising 0x90 (`HeadphonesV2.cpp:88-90`).
+pub fn alerts_on(facts: &Facts) -> Option<Outgoing> {
+    if !facts.advertises_one(&[0x90]) {
+        return None;
+    }
+    Some(Outgoing::new(
+        DataType::DataMdr,
+        Evidence::ReferenceClient {
+            set: "AlertSetStatusFixedMessage",
+            cite: "libmdr HeadphonesV2.cpp:88-90, status = EnableDisable::ENABLE",
+        },
+        0x94,
+        0x00,
+        &[ENABLE],
+    ))
+}
+
+/// `AlertSetParamFixedMessage` (T1:2210): `98 00 <message> <AlertAction>`,
+/// the answer to the question the headset is asking. HEADER ONLY: libmdr
+/// records alerts and never answers one.
+///
+/// The message byte is ECHOED from the question, never chosen: an answer
+/// carrying another message type answers a question nobody asked. Refused
+/// when there is no question.
+fn encode_alert(facts: &Facts, yes: bool) -> Result<Outgoing, Refusal> {
+    let Some((message, _)) = facts.alert else {
+        return Err(Refusal::NotAsked { verb: "alert" });
+    };
+    // AlertAction (T1:40): NEGATIVE 0x00, POSITIVE 0x01.
+    let action = if yes { 0x01 } else { 0x00 };
+    Ok(Outgoing::new(
+        DataType::DataMdr,
+        Evidence::HeaderOnly {
+            set: "AlertSetParamFixedMessage",
+            unverified: "no client answers alerts; libmdr records them and never replies",
+        },
+        0x98,
+        0x00,
+        &[message, action],
+    ))
 }
 
 enum NcAsmEdit<'a> {

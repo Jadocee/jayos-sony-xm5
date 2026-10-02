@@ -1223,3 +1223,46 @@ fn a_setting_name_two_slots_answer_to_is_refused_rather_than_guessed() {
     assert_eq!(write(&plain, "sidetone").expect("a frame").payload[1], 0xD1);
     assert!(matches!(write(&plain, "touch_panel"), Err(Refusal::NotRead { .. })));
 }
+
+#[test]
+fn alerts_are_asked_for_on_request_and_answered_only_when_asked() {
+    // PLAN 23, ITEM 14.
+    //
+    // Enabling: `94 00 00`, as libmdr sends it, and only to a headset that
+    // advertises FIXED_MESSAGE (t1 0x90) -- which the captured one does.
+    let enable = encode::alerts_on(&captured_facts()).expect("the WF-1000XM5 advertises 0x90");
+    assert_eq!(enable.payload, vec![0x94, 0x00, 0x00]);
+    assert_eq!(enable.evidence.tier(), "reference-client");
+    assert_eq!(enable.ret_twin(), Some(0x93), "ALERT_RET_STATUS");
+    assert!(encode::alerts_on(&only_table_one(&[0x12])).is_none());
+    // And never as one of the ordinary queries: alerts are the person's
+    // switch, not the advertised table's.
+    assert!(encode::feature_gets(&captured_facts()).iter().all(|q| q.command() != Some(0x94)));
+
+    // An answer with no question is refused, on the device's side.
+    let mut facts = only_table_one(&[0x90]);
+    match encode::encode(&facts, &Verb::Alert(true)) {
+        Err(refusal @ Refusal::NotAsked { .. }) => {
+            assert_eq!(refusal.clone().side(), Side::Device);
+            assert!(refusal.message().contains("not asking"), "{}", refusal.message());
+        }
+        other => panic!("an answer to nothing produced {other:?}"),
+    }
+
+    // Asked: the message byte is echoed and AlertAction is POSITIVE 0x01 or
+    // NEGATIVE 0x00. HEADER ONLY -- nobody answers alerts -- and there is no
+    // RET to confirm it: the family has no 0x97.
+    facts.observe(DataType::DataMdr, &[0x99, 0x00, 0x07, 0x01]);
+    assert_eq!(facts.alert(), Some((0x07, 0x01)));
+    for (yes, action) in [(true, 0x01u8), (false, 0x00)] {
+        let out = encode::encode(&facts, &Verb::Alert(yes)).expect("a frame");
+        assert_eq!(out.payload, vec![0x98, 0x00, 0x07, action]);
+        assert_eq!(out.evidence.tier(), "header-only");
+        assert_eq!(out.ret_twin(), None);
+    }
+    // A newer question replaces the older one; answering clears it.
+    facts.observe(DataType::DataMdr, &[0x99, 0x00, 0x08, 0x01]);
+    assert_eq!(encode::encode(&facts, &Verb::Alert(true)).expect("a frame").payload[2], 0x08);
+    facts.alert_answered();
+    assert!(matches!(encode::encode(&facts, &Verb::Alert(true)), Err(Refusal::NotAsked { .. })));
+}

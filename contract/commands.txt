@@ -17,3 +17,4 @@ general <setting> on|off
 connection quality|stable
 volume 0..100
 playback play|pause|next|previous
+alert yes|no

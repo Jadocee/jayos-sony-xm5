@@ -1196,3 +1196,34 @@ fn table_two_voice_guidance_safe_listening_and_pairing_read_as_the_reference_cli
         );
     }
 }
+
+#[test]
+fn an_alert_is_read_raw_and_named_from_the_header() {
+    // PLAN 23, ITEM 14. `99 00 <AlertMessageType> <AlertActionType>`, at
+    // FIXED_MESSAGE only. No capture holds one; the recorder never enabled
+    // alerts.
+    assert_eq!(payload::decode(MDR, &[0x99, 0x00, 0x07, 0x01]), Reading::Alert { message: 0x07, action: 0x01 });
+    assert_eq!(payload::grounds(MDR, &[0x99, 0x00, 0x07, 0x01]), Some(payload::Grounds::ReferenceClient));
+    // Another alert type, another length, or table 2: not this message.
+    for (table, bytes) in [
+        (MDR, &[0x99u8, 0x02, 0x07, 0x01][..]),
+        (MDR, &[0x99, 0x00, 0x07]),
+        (DataType::DataMdrNo2, &[0x99, 0x00, 0x07, 0x01]),
+    ] {
+        assert!(matches!(payload::decode(table, bytes), Reading::Unhandled { .. }), "{bytes:02x?}");
+    }
+
+    // The names are the header's, transcribed whole: 107 declared values.
+    assert_eq!(payload::alert_message_name(0x07), Some("DISCONNECT_CAUSED_BY_CHANGING_MULTIPOINT"));
+    assert_eq!(payload::alert_message_name(0x95), Some("CAUTION_FOR_USB_OVERHEAT_DETECTION_DURING_CASE_IN"));
+    assert_eq!(payload::alert_message_name(0x04), None, "0x04 is a hole in the enum");
+    assert_eq!((0u8..=255).filter(|b| payload::alert_message_name(*b).is_some()).count(), 107);
+    assert_eq!(payload::alert_action_word(0x01), "positive_negative");
+    assert_eq!(payload::alert_action_word(0x07), "unknown");
+
+    // Which answers drop the link: every DISCONNECT_*, and the firmware one.
+    assert!(payload::alert_disconnects(0x07));
+    assert!(payload::alert_disconnects(0x02), "NEED_DISCONNECTION_FOR_UPDATING_FIRMWARE");
+    assert!(!payload::alert_disconnects(0x08), "a battery caution is not a disconnect");
+    assert!(!payload::alert_disconnects(0x04), "an undeclared byte promises nothing");
+}

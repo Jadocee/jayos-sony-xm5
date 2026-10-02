@@ -2,6 +2,7 @@
 //!
 //!     qs-sonyd                    run in the foreground until stopped
 //!     qs-sonyd once               dial, publish one document, exit
+//!     qs-sonyd --alerts           also ask the headset for its confirmations
 //!
 //! Speaks the MDR protocol to a connected Sony headset over RFCOMM, publishes
 //! its state as JSON, and takes commands on a private Unix socket. It is a
@@ -184,7 +185,11 @@ fn main() -> ExitCode {
     // The document exists before anything is connected. A reader that finds no
     // file cannot tell a daemon that has not started from one that has nothing
     // to say, and `qs-sony available` is the difference.
-    let session = Session::new(sony::DAEMON_VERSION.to_string(), Limits::default());
+    // Off unless asked for: a headset with alerts on waits for an answer, and
+    // only a page that shows the question can give one. `encode::alerts_on`
+    // has the long form.
+    let session = Session::new(sony::DAEMON_VERSION.to_string(), Limits::default())
+        .with_alerts(args.has("alerts"));
     publish(&session);
 
     let stopper = bound.stopper();

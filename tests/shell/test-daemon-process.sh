@@ -62,8 +62,13 @@ mkdir -p "$WORK/bin"
 # shows up as `bash /path/qs-sonyd` instead, and an anchored pattern would
 # rightly not match it -- so without this the suite would be testing a process
 # shape the real daemon never has.
+#
+# It also writes the arguments it was given, one per line, beside itself, so
+# the --alerts passthrough can be checked against what the daemon received
+# rather than against what the script meant to pass.
 cat > "$WORK/bin/qs-sonyd" <<'FAKE'
 #!/usr/bin/env bash
+printf '%s\n' "$@" > "${0%/*}/argv"
 echo "qs-sonyd: no decoder for command 0x66 kind 0x17 len 3" >&2
 exec -a "$0" sleep 300
 FAKE
@@ -147,6 +152,52 @@ if ! run running >/dev/null; then
     pass "and \`running\` then exits non-zero"
 else
     bad "\`running\` exited 0 with no daemon"
+fi
+
+echo
+echo "--alerts reaches the daemon, and nothing else does"
+
+# Plan 23, item 14. Alerts are off unless asked for, and the asking is this
+# one flag: jayos's setting half passes it when QS_SONYD_ALERTS=1.
+rm -f "$WORK/bin/argv"
+run start --alerts >/dev/null
+sleep 0.3
+if alive && [[ "$(cat "$WORK/bin/argv" 2>/dev/null)" == "--alerts" ]]; then
+    pass "start --alerts starts the daemon with --alerts"
+else
+    bad "start --alerts gave the daemon '$(cat "$WORK/bin/argv" 2>/dev/null)'"
+fi
+# The anchored pattern still finds a daemon whose command line carries the
+# flag: it ends the path at a space, and that is the space.
+run stop >/dev/null
+sleep 0.4
+if ! alive; then
+    pass "and stop finds and stops it"
+else
+    bad "stop missed a daemon started with --alerts"
+fi
+
+rm -f "$WORK/bin/argv"
+run start >/dev/null
+sleep 0.3
+if [[ -f "$WORK/bin/argv" && -z "$(tr -d '\n' < "$WORK/bin/argv")" ]]; then
+    pass "a plain start passes the daemon no argument"
+else
+    bad "a plain start gave the daemon '$(cat "$WORK/bin/argv" 2>/dev/null)'"
+fi
+run stop >/dev/null
+sleep 0.4
+
+# Anything else is refused BEFORE the daemon starts: once it has detached,
+# its refusal would go to a log nobody reads.
+out=$(run start --verbose)
+status=$?
+sleep 0.3
+if [[ "$status" == "2" && "$out" == *"only --alerts"* ]] && ! alive; then
+    pass "start refuses any other argument with status 2 and starts nothing"
+else
+    bad "start --verbose answered '$out' with status $status"
+    run stop >/dev/null
 fi
 
 echo

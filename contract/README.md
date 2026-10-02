@@ -10,7 +10,8 @@ and each file's sha256, and its suites hold its pages to the copy.
 |---|---|---|
 | `VERSION` | The state document's `schema_version`. A reader refuses a newer one. | generated |
 | `state.example.json` | The document the daemon publishes after the WF-1000XM5 corpus in `tests/fixtures/mdr/`, replayed through the daemon's own engine (`qs-sony replay`). One compact line, exactly as the daemon writes it. | generated |
-| `keys.txt` | Every key path that document carries, as `a.b` with `[]` for an array's elements. jayos's Headphones page may read these and no others. | generated |
+| `state.alert.example.json` | The same replay with one synthetic frame after it, `99 00 07 01` -- the headset asking a yes/no question about multipoint -- so the document shows a pending `alert`. Synthetic: no capture holds an alert. | generated |
+| `keys.txt` | Every key path those two documents carry, as `a.b` with `[]` for an array's elements. jayos's Headphones page may read these and no others. | generated |
 | `commands.txt` | The command language the socket accepts, one form per line. jayos's pages may send these verbs and no others. | generated |
 | `sony-prefixes.txt` | The device-name fragments `qs-sony devices` treats as a Sony headset. jayos's Devices page makes the same match before this package is installed, when there is no `qs-sony` to ask. | generated |
 | `qs-devices.example.json` | The output of jayos's `qs-devices list`, which `qs-sony devices` reads. The one file here that describes jayos rather than this package: jayos holds its `qs-devices` to it, and `qs-sony`'s tests read it. | written by hand |

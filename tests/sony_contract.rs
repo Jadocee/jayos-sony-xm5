@@ -132,6 +132,8 @@ const OUR_ADDITIONS: &str = concat!(
     // mode, every one `null` until the headset has said.
     r#","voice_guidance":{"enabled":null,"volume":null,"language":null}"#,
     r#","safe_listening":{"level":null,"cause":null},"pairing_mode":null"#,
+    // Plan 23, item 14: the question the headset is waiting on, if any.
+    r#","alert":null"#,
 );
 
 #[test]
@@ -335,11 +337,16 @@ fn the_usage_text_lists_every_verb_the_grammar_accepts() {
     // names appear inside another verb's argument list in the usage text, so
     // a substring test for them would pass on a text that never names them.
     // Asked for as whole lines instead.
-    for line in ["  volume 0..100\n", "  playback play|pause|next|previous\n"] {
+    for line in ["  volume 0..100\n", "  playback play|pause|next|previous\n", "  alert yes|no\n"] {
         assert!(text.contains(line), "usage() is missing the line {line:?}:\n{text}");
     }
     assert_eq!(command::parse_line("volume 50"), Ok(Command::Volume(50)));
     assert_eq!(command::parse_line("playback play"), Ok(Command::Playback("play".into())));
+    // `alert` answers yes or no -- a question, not a setting, so `on` is not
+    // an answer.
+    assert_eq!(command::parse_line("alert yes"), Ok(Command::Alert(true)));
+    assert_eq!(command::parse_line("alert no"), Ok(Command::Alert(false)));
+    assert_eq!(command::parse_line("alert on"), Err("alert must be yes or no".to_string()));
 }
 
 #[test]

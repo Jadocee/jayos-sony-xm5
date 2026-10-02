@@ -535,9 +535,29 @@ pub struct State {
     pub safe_listening: SafeListening,
     /// Whether the headset is discoverable for pairing, from table 2.
     pub pairing_mode: Option<bool>,
+    /// The question the headset is waiting on, or `None`. Plan 23, item 14:
+    /// only ever set when `qs-sonyd --alerts` enabled them, and cleared the
+    /// moment a page answers with `alert yes|no`.
+    pub alert: Option<Alert>,
     /// The last thing that went wrong, or empty. A page shows this instead of
     /// looking broken when there is nothing to show.
     pub last_error: String,
+}
+
+/// A pending alert, as the document publishes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alert {
+    /// `AlertMessageType`'s name, lowercased --
+    /// `disconnect_caused_by_changing_multipoint` -- or `unknown` for a byte
+    /// the header does not declare. `message_code` carries the byte either way.
+    pub message_type: String,
+    pub message_code: u8,
+    /// `confirmation_only`, `positive_negative`,
+    /// `positive_confirmation_with_reply` or `unknown`.
+    pub action_type: String,
+    /// Whether a yes makes the headset drop the link: every `DISCONNECT_*`
+    /// message. A page says so before the person answers.
+    pub disconnects: bool,
 }
 
 /// Voice guidance, as the document publishes it.
@@ -598,6 +618,7 @@ impl Default for State {
             voice_guidance: VoiceGuidance::default(),
             safe_listening: SafeListening::default(),
             pairing_mode: None,
+            alert: None,
             last_error: String::new(),
         }
     }
@@ -881,6 +902,19 @@ pub fn serialize(state: &State, daemon_version: &str) -> String {
         json_or_null(sl.cause.as_deref().map(|c| format!("\"{}\"", json_escape(c)))),
     );
     let _ = write!(out, ",\"pairing_mode\":{}", json_or_null(state.pairing_mode.map(|b| bool_json(b).to_string())));
+    let _ = write!(
+        out,
+        ",\"alert\":{}",
+        json_or_null(state.alert.as_ref().map(|a| {
+            format!(
+                "{{\"message_type\":\"{}\",\"message_code\":{},\"action_type\":\"{}\",\"disconnects\":{}}}",
+                json_escape(&a.message_type),
+                a.message_code,
+                json_escape(&a.action_type),
+                bool_json(a.disconnects)
+            )
+        }))
+    );
     let _ = write!(out, ",\"last_error\":\"{}\"}}", json_escape(&state.last_error));
     // The trailing newline is part of the document: the file ends in exactly
     // this one, the `"}\n"` the reference's `serializeState` (state.cpp)

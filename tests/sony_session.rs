@@ -1593,3 +1593,98 @@ fn connection_playback_and_dsee_availability_reach_the_document() {
     assert_eq!((*command, *kind, *tier), (0xE8, 0x02, "header-only"));
     assert_eq!(*set, "AudioSetParamConnectionWithLdacStatus");
 }
+
+#[test]
+fn alerts_are_off_unless_asked_for_and_an_answer_jumps_the_queue() {
+    // PLAN 23, ITEM 14, end to end.
+    //
+    // Off by default: the corpus's headset advertises FIXED_MESSAGE, and a
+    // default session never asks for its alerts.
+    let enabled = |effects: &[Effect]| {
+        sent(effects).iter().any(|w| frame::unpack(w).is_ok_and(|f| f.payload == [0x94, 0x00, 0x00]))
+    };
+    let mut plain = fresh();
+    let out = replay(&mut plain, usize::MAX);
+    assert!(!enabled(&out), "alerts were enabled without --alerts");
+
+    let mut session = fresh().with_alerts(true);
+    let out = replay(&mut session, usize::MAX);
+    let mut now = 20_000;
+    let mut all = out.clone();
+    // The enable rides behind the feature queries; drain them to see it.
+    for _ in 0..64 {
+        let step = session.step(Input::Tick { now });
+        all.extend(step.iter().cloned());
+        acknowledge_all(&mut session, step, &mut now);
+        if enabled(&all) {
+            break;
+        }
+    }
+    assert!(enabled(&all), "--alerts did not ask the headset for its alerts");
+
+    // A question: DISCONNECT_CAUSED_BY_CHANGING_MULTIPOINT, yes or no.
+    let mut seq = 0u8;
+    let mut feed = |session: &mut Session, now: u64, payload: &[u8]| -> Vec<Effect> {
+        let out = session.step(Input::Bytes { now, bytes: &frame::pack(DataType::DataMdr, seq, payload) });
+        seq = 1 - seq;
+        out
+    };
+    feed(&mut session, now + 10, &[0x99, 0x00, 0x07, 0x01]);
+    let v: serde_json::Value = serde_json::from_str(&session.document()).expect("json");
+    assert_eq!(
+        v["alert"],
+        serde_json::json!({
+            "message_type": "disconnect_caused_by_changing_multipoint",
+            "message_code": 7,
+            "action_type": "positive_negative",
+            "disconnects": true
+        })
+    );
+
+    // Fill the outbox to its cap, then answer: the answer is not refused for
+    // room, and it is the next frame out, ahead of everything queued.
+    let mut before = Vec::new();
+    for i in 0..80 {
+        before.extend(session.step(Input::Command { now: now + 20, id: ClientId(100 + i), line: "refresh" }));
+    }
+    let out = session.step(Input::Command { now: now + 30, id: ClientId(7), line: "alert yes" });
+    assert!(
+        !out.iter().any(|e| matches!(e, Effect::Reply { id: ClientId(7), line } if line.starts_with("error"))),
+        "the answer was refused: {out:?}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&session.document()).expect("json");
+    assert_eq!(v["alert"], serde_json::Value::Null, "the question is still shown after it was answered");
+    // Every data frame from here on, in wire order: the one already in flight
+    // when the answer was given, then whatever the engine sends next.
+    let mut order: Vec<Vec<u8>> = Vec::new();
+    let mut pending: Vec<Effect> = before.into_iter().chain(out).collect();
+    let mut t = now + 40;
+    for _ in 0..200 {
+        let Some(f) = sent(&pending).iter().filter_map(|w| frame::unpack(w).ok()).find(|f| f.data_type.is_data())
+        else {
+            break;
+        };
+        order.push(f.payload.clone());
+        pending = session.step(Input::Bytes { now: t, bytes: &frame::ack_frame(f.seq) });
+        t += 1;
+    }
+    let position = order.iter().position(|p| p.first() == Some(&0x98)).expect("the answer never reached the wire");
+    assert_eq!(order[position], vec![0x98, 0x00, 0x07, 0x01]);
+    assert_eq!(position, 1, "the answer waited behind {} frames: {order:02x?}", position);
+    assert!(order.len() > 2, "nothing was queued behind it, so the test proved nothing: {order:02x?}");
+
+    // The headset then drops the link, as its question said it would: that
+    // is a clean close, not an error.
+    session.step(Input::LinkDown { now: t + 100, why: Down::Failed("connection reset") });
+    let v: serde_json::Value = serde_json::from_str(&session.document()).expect("json");
+    assert_eq!(v["phase"], "idle", "{v}");
+    assert_eq!(v["last_error"], "");
+
+    // And a second answer, with nothing asked, is refused.
+    let mut session = ready_session();
+    let out = session.step(Input::Command { now: 9_000, id: ClientId(8), line: "alert no" });
+    assert!(
+        out.iter().any(|e| matches!(e, Effect::Reply { line, .. } if line.contains("not asking"))),
+        "{out:?}"
+    );
+}
