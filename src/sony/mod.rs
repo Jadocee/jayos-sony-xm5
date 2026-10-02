@@ -14,6 +14,7 @@
 
 pub mod command;
 pub mod link;
+pub mod replay;
 pub mod sdp;
 pub mod serve;
 pub mod session;

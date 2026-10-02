@@ -310,6 +310,47 @@ pub fn parse_words(words: &[&str]) -> Result<Command, String> {
     }
 }
 
+/// One form of the command language, and lines that are instances of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Form {
+    /// The form as [`usage`] writes it, e.g. `noise off|anc|ambient`.
+    pub form: &'static str,
+    /// Lines a client may send, every one of which [`parse_words`] accepts.
+    pub examples: &'static [&'static str],
+}
+
+/// The command language as data, for the contract.
+///
+/// `contract/commands.txt` is generated from this, and jayos holds its
+/// Headphones page to that file: every verb the page sends must be a verb
+/// here. A list a test could not run would be a second prose description of
+/// the grammar, free to drift from the parser -- so `tests/contract.rs` sends
+/// every example through [`parse_words`], requires every [`Command`] variant to
+/// be reached by one, and requires [`usage`] to be exactly these forms. The
+/// first catches a form the parser no longer accepts, the second a verb added
+/// to the parser and not here, the third a help text that says otherwise.
+pub const GRAMMAR: &[Form] = &[
+    Form { form: "status", examples: &["status"] },
+    Form { form: "panel-open", examples: &["panel-open"] },
+    Form { form: "panel-close", examples: &["panel-close"] },
+    Form { form: "refresh", examples: &["refresh"] },
+    Form { form: "noise off|anc|ambient", examples: &["noise off", "noise anc", "noise ambient"] },
+    Form { form: "ambient-level 1..20", examples: &["ambient-level 1", "ambient-level 20"] },
+    Form { form: "focus-on-voice on|off", examples: &["focus-on-voice on", "focus-on-voice off"] },
+    Form { form: "speak-to-chat on|off", examples: &["speak-to-chat on", "speak-to-chat off"] },
+    Form { form: "dsee on|off", examples: &["dsee on", "dsee off"] },
+    Form { form: "eq-preset <preset>", examples: &["eq-preset off", "eq-preset bright"] },
+    Form { form: "eq-band <1..10> <-10..10>", examples: &["eq-band 1 -10", "eq-band 10 10"] },
+    Form { form: "clear-bass <-10..10>", examples: &["clear-bass -10", "clear-bass 10"] },
+    Form { form: "general <setting> on|off", examples: &["general multipoint on", "general touch_panel off"] },
+    Form { form: "connection quality|stable", examples: &["connection quality", "connection stable"] },
+    Form { form: "volume 0..100", examples: &["volume 0", "volume 100"] },
+    Form {
+        form: "playback play|pause|next|previous",
+        examples: &["playback play", "playback pause", "playback next", "playback previous"],
+    },
+];
+
 /// The verb list, for `--help` and for a rejected command.
 pub fn usage() -> &'static str {
     concat!(

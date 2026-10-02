@@ -4,6 +4,7 @@
 //!     qs-sony devices             connected headsets, and what to offer for each
 //!     qs-sony send <command...>   one command over the daemon's socket
 //!     qs-sony available           exit 0 if the daemon is reachable
+//!     qs-sony replay <dir> [--peer=NAME]   the document a capture produces
 //!
 //! A thin wrapper over the headphone daemon: something that speaks the Sony |
 //! Sound Connect protocol, publishes JSON state and accepts commands on a
@@ -928,6 +929,7 @@ fn main() -> ExitCode {
         "status" => status(),
         "devices" => devices(),
         "available" => available(),
+        "replay" => replay(&args),
         "send" => {
             // Taken raw rather than from `Args`, because everything after the
             // verb belongs to the daemon's protocol and not to ours: a flag it
@@ -953,9 +955,42 @@ fn main() -> ExitCode {
         other => emit::unknown_command(
             "qs-sony",
             other,
-            &["status", "devices", "send", "available"],
+            &["status", "devices", "send", "available", "replay"],
         ),
     }
+}
+
+/// The document a daemon would publish after receiving a capture.
+///
+/// For a person with a capture directory -- a corpus here, or what
+/// `qs-sonyd --record` wrote -- who wants to see what the daemon makes of it
+/// without a headset in reach. The same function produces the contract's
+/// `state.example.json`; see `sony::replay` for why the playback is
+/// deterministic and why only received frames are played.
+///
+/// Printed as the daemon writes it: one compact line. `| jq .` is the way to
+/// read it, and printing it differently here would make it a different
+/// document from the one the shell reads.
+fn replay(args: &Args) -> ExitCode {
+    if let Some(code) = args.reject_unknown(&["peer"]) {
+        return code;
+    }
+    let Some(dir) = args.positional(0) else {
+        return emit::failure("replay needs a capture directory");
+    };
+    let frames = match sony_xm5::sony::replay::received_frames(Path::new(dir)) {
+        Ok(frames) => frames,
+        Err(e) => return emit::failure(&format!("cannot read {dir}: {e}")),
+    };
+    // A directory with no received frame in it is a wrong path far more often
+    // than a capture of nothing, and a document of defaults would look like an
+    // answer.
+    if frames.is_empty() {
+        return emit::failure(&format!("{dir} holds no received frame (*-rx.*.bin)"));
+    }
+    let peer = args.value("peer").unwrap_or("WF-1000XM5");
+    print!("{}", sony_xm5::sony::replay::document(&frames, peer, sony_xm5::sony::DAEMON_VERSION));
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]
@@ -1509,6 +1544,22 @@ mod tests {
         assert_eq!(read_state_reason().expect_err("refused").0, Missing::Unreadable);
         let _ = std::fs::remove_dir_all(&run);
         let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn the_inventory_shape_in_the_contract_is_read_as_jayos_writes_it() {
+        // `qs-devices list` is jayos's, and this reads it across a repository
+        // boundary. contract/qs-devices.example.json is the shape jayos's
+        // qs-devices writes -- jayos holds its own output to the same file --
+        // so a field renamed on either side fails a test on that side.
+        let inventory: Value =
+            serde_json::from_str(include_str!("../../contract/qs-devices.example.json")).expect("valid JSON");
+        let found = collect(&inventory, true, false);
+        let names: Vec<&str> = found.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["WH-1000XM5", "WF-1000XM5"], "a mouse is not a headset, and a card with no battery still is");
+        assert_eq!(found[0].battery, json!(80), "the battery is read from `percent`");
+        assert!(found[0].sony && found[1].sony, "both are Sony models");
+        assert_eq!(found[0].action, "start", "installed and not running offers a start");
     }
 
     #[test]
