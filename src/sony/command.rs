@@ -167,8 +167,12 @@ pub fn parse_words(words: &[&str]) -> Result<Command, String> {
         // hardware. `ProtocolV2T1.hpp` declares no range on any of its 32
         // `ambientSoundLevelValue` fields; the real bound is per-device and
         // per-mode, delivered as a `Range { min, max, step }` in a
-        // NCASM_RET_CAPABILITY reply no capture in this project contains.
-        // See `sony::state::Noise::ambient_level`.
+        // NCASM_RET_CAPABILITY reply. The daemon asks for that reply and
+        // holds a write to it (`mdr::encode::encode_ncasm`), which can only
+        // NARROW this: widening the grammar would change what `ambient-level
+        // 21` answers, and that answer is part of the contract too
+        // (`sony_contract.rs`). The document publishes the range in force as
+        // `ambient_range`.
         ("ambient-level", 2) => match arg.parse::<i32>() {
             Ok(v) if (1..=20).contains(&v) => Ok(Command::AmbientLevel(v)),
             _ => Err("ambient-level must be an integer from 1 to 20".to_string()),

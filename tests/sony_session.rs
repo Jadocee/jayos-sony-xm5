@@ -1456,3 +1456,74 @@ fn every_frame_a_command_becomes_is_logged_with_its_evidence() {
         "a refused command was logged as sent"
     );
 }
+
+#[test]
+fn an_over_ear_headset_publishes_one_battery_from_either_header_form() {
+    // PLAN 23, ITEM 1, the publishing half, end to end through the session.
+    // HEADER ONLY -- no capture in the corpus is a WH -- with the layouts
+    // corroborated by libmdr's decoder and Gadgetbridge's (level at offset 2,
+    // charging at offset 3). The decode itself is pinned in mdr_payload.rs;
+    // what this pins is that the reading reaches `battery.main` and only
+    // there, that the support table makes it a single-battery headset, and
+    // that a volunteered change (POWER_NTFY_STATUS, 0x25) moves it.
+    // (function, answer, volunteered change, level, charging, then both again)
+    type Case<'a> = (u8, &'a [u8], &'a [u8], i64, &'a str, i64, &'a str);
+    let cases: [Case; 2] = [
+        // BATTERY_LEVEL_INDICATOR: 73% charging, then 74% not.
+        (0x20, &[0x23, 0x00, 0x49, 0x01], &[0x25, 0x00, 0x4a, 0x00], 73, "yes", 74, "no"),
+        // BATTERY_LEVEL_WITH_THRESHOLD: 100% not charging, then 99% charging.
+        (0x28, &[0x23, 0x08, 0x64, 0x00, 0x14], &[0x25, 0x08, 0x63, 0x01, 0x14], 100, "no", 99, "yes"),
+    ];
+    for (function, answer, notify, level, charging, later, later_charging) in cases {
+        let mut session = fresh();
+        session.step(Input::LinkUp { now: 0, peer: Peer { name: "WH-1000XM5".to_string(), protocol: 2 } });
+        let mut seq = 0u8;
+        let mut feed = |session: &mut Session, now: u64, payload: &[u8]| {
+            session.step(Input::Bytes { now, bytes: &frame::pack(DataType::DataMdr, seq, payload) });
+            seq = 1 - seq;
+        };
+        feed(&mut session, 10, &[0x07, 0x00, 0x01, function, 0xFF]);
+        feed(&mut session, 20, answer);
+
+        let v: serde_json::Value = serde_json::from_str(&session.document()).expect("json");
+        assert_eq!(v["capabilities"]["battery_single"], true, "function {function:#04x}");
+        assert_eq!(v["capabilities"]["battery_left_right"], false);
+        assert_eq!(v["battery"]["main"]["present"], true, "{}", v["battery"]);
+        assert_eq!(v["battery"]["main"]["level"], level);
+        assert_eq!(v["battery"]["main"]["charging"], charging);
+        for part in ["left", "right", "case"] {
+            assert_eq!(v["battery"][part]["present"], false, "an over-ear headset grew a {part} battery");
+        }
+
+        feed(&mut session, 30, notify);
+        let v: serde_json::Value = serde_json::from_str(&session.document()).expect("json");
+        assert_eq!(v["battery"]["main"]["level"], later, "the volunteered change did not land");
+        assert_eq!(v["battery"]["main"]["charging"], later_charging);
+    }
+}
+
+#[test]
+fn the_document_publishes_the_ambient_range_the_headset_stated() {
+    // PLAN 23, ITEM 2, end to end: the corpus has no capability reply, so the
+    // range is the compatibility one; a headset that states one is believed,
+    // and focus-on-voice moves which of its ranges applies.
+    let mut session = ready_session();
+    let range = |session: &Session| -> serde_json::Value {
+        let v: serde_json::Value = serde_json::from_str(&session.document()).expect("json");
+        v["ambient_range"].clone()
+    };
+    assert_eq!(range(&session), serde_json::json!({"min":1,"max":20,"step":1,"source":"compat"}));
+
+    let mut seq = 0u8;
+    let mut feed = |session: &mut Session, now: u64, payload: &[u8]| {
+        session.step(Input::Bytes { now, bytes: &frame::pack(DataType::DataMdr, seq, payload) });
+        seq = 1 - seq;
+    };
+    // At 0x17, the type the corpus's NC/ASM reading came from.
+    feed(&mut session, 8_000, &[0x61, 0x17, 0x02, 0x00, 0x01, 0x0C, 0x01, 0x01, 0x02, 0x0A, 0x02]);
+    assert_eq!(range(&session), serde_json::json!({"min":1,"max":12,"step":1,"source":"device"}));
+
+    // Focus on voice, volunteered by the headset: the VOICE range now.
+    feed(&mut session, 8_010, &[0x69, 0x17, 0x01, 0x01, 0x01, 0x01, 0x04]);
+    assert_eq!(range(&session), serde_json::json!({"min":2,"max":10,"step":2,"source":"device"}));
+}

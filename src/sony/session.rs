@@ -679,6 +679,22 @@ impl Session {
         self.inflight = Some(InFlight { pending, seq, sent_at: self.last_now, tries: 0 });
     }
 
+    /// The ambient level's range for the mode the headset is in now, as it
+    /// stated it, or the compatibility range when it has not.
+    ///
+    /// From `facts` rather than from the reading in hand, so the document and
+    /// the encoder answer the same question the same way: a level the page
+    /// offers is a level the encoder accepts. Re-derived on a noise reading as
+    /// well as on a capability reply, because focus-on-voice moves which of
+    /// the two ranges applies.
+    fn refresh_ambient_range(&mut self) {
+        let voice = self.state.noise.focus_on_voice;
+        self.state.ambient_range = match self.facts.ambient_range(voice) {
+            Some(r) => state::AmbientRange { min: r.min, max: r.max, step: r.step, from_device: true },
+            None => state::AmbientRange::default(),
+        };
+    }
+
     fn publish_if_changed(&mut self, out: &mut Vec<Effect>) {
         self.state.phase = self.phase.as_str().to_string();
         let now = self.document();
@@ -711,9 +727,31 @@ impl Session {
             }
             payload::Reading::Noise(report) => {
                 self.state.noise.mode = report.mode.as_str().to_string();
-                self.state.noise.ambient_level = i32::from(report.ambient_level);
-                self.state.noise.focus_on_voice = report.focus_on_voice;
+                // Only what this variant carries. NC_ON_OFF has no level and
+                // no ambient mode, and publishing a zero for them would draw a
+                // level nobody set.
+                if let Some(level) = report.ambient_level {
+                    self.state.noise.ambient_level = i32::from(level);
+                }
+                if let Some(voice) = report.focus_on_voice {
+                    self.state.noise.focus_on_voice = voice;
+                }
+                if let Some(adaptive) = report.adaptive {
+                    self.state.noise.adaptive = adaptive;
+                }
+                if let Some(byte) = report.adaptive_sensitivity {
+                    // NoiseAdaptiveSensitivity (T1:1203).
+                    self.state.noise.adaptive_sensitivity = match byte {
+                        0x00 => "standard",
+                        0x01 => "high",
+                        0x02 => "low",
+                        _ => "unknown",
+                    }
+                    .to_string();
+                }
+                self.refresh_ambient_range();
             }
+            payload::Reading::NoiseCapability { .. } => self.refresh_ambient_range(),
             payload::Reading::Device(info) => {
                 if !info.model.is_empty() {
                     self.state.device.model = info.model.clone();

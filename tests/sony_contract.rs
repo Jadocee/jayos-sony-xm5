@@ -119,7 +119,13 @@ const REFERENCE_DOCUMENT: &str = concat!(
 /// reference output to match for this key -- it is ours, and being able to
 /// subtract it is what keeps the byte-for-byte claim about everything else
 /// honest.
-const OUR_ADDITIONS: &str = r#","general_settings":[],"paired_devices":[]"#;
+const OUR_ADDITIONS: &str = concat!(
+    r#","general_settings":[],"paired_devices":[]"#,
+    // Plan 23, item 2: the range the headset stated for its ambient level,
+    // or the C++ daemon's 1..=20 -- which is what a document with no
+    // NCASM_RET_CAPABILITY behind it says, as this one has none.
+    r#","ambient_range":{"min":1,"max":20,"step":1,"source":"compat"}"#,
+);
 
 #[test]
 fn the_document_is_the_c_implementations_plus_the_keys_this_daemon_adds() {

@@ -66,15 +66,17 @@
 //!
 //! THE INQUIRED TYPE IS ECHOED, NEVER INFERRED. The captured device answers
 //! NC/ASM at 0x17, but the corpus is a WF-1000XM5 and this tree targets a
-//! WH-1000XM5 -- "the wrong ear", as PROVENANCE.md puts it. So the encoder
-//! writes at whatever type the attached headset answered at, and refuses when
-//! it has not answered. It does NOT derive the type from the support table:
-//! t1 `FunctionType` 0x6B corresponds to `NcAsmInquiredType` 0x17 by a name
-//! match, and a name match is what this module exists not to trust.
+//! WH-1000XM5 -- "the wrong ear", as PROVENANCE.md puts it -- and the
+//! WH-1000XM5 has been reported at 0x15, 0x17 and 0x19 by three different
+//! projects. So the encoder writes at whatever type, and in whatever layout,
+//! the attached headset answered with, and refuses when it has not answered.
+//! The support table chooses only the type a QUESTION is asked at
+//! (`ncasm_type`): a GET carries no value, so a wrong guess there costs a
+//! round trip, where a wrong guess in a SET would write the wrong byte.
 
 use super::payload::{
-    self, Command, DseeReport, EqReport, GeneralSetting, NoiseMode, NoiseReport, Reading,
-    SpeakToChatReport, SupportFunction, Switch, Table,
+    self, AmbientRange, Command, DseeReport, EqReport, GeneralSetting, NoiseMode, NoiseReport,
+    Reading, SpeakToChatReport, SupportFunction, Switch, Table,
 };
 use super::DataType;
 use crate::sony::command::{Command as Verb, EQ_PRESETS, MDR_VOLUME_MAX};
@@ -258,6 +260,9 @@ pub enum Refusal {
     Undocumented { verb: &'static str, field: &'static str, struct_name: &'static str },
     /// A value this port will not put on the wire.
     OutOfRange { verb: &'static str, value: i32, bound: &'static str },
+    /// A value outside the range the headset itself stated, or outside the
+    /// compatibility range when it has stated none.
+    OutOfDeviceRange { verb: &'static str, value: i32, min: u8, max: u8, step: u8 },
     /// A verb with no device message behind it at all.
     NoEncoder { verb: &'static str, why: &'static str },
 }
@@ -270,7 +275,8 @@ impl Refusal {
             Refusal::NotRead { .. }
             | Refusal::NotAdvertised { .. }
             | Refusal::UnknownVariant { .. }
-            | Refusal::OutOfRange { .. } => Side::Device,
+            | Refusal::OutOfRange { .. }
+            | Refusal::OutOfDeviceRange { .. } => Side::Device,
             // These three are this port's gaps, not the headset's.
             Refusal::Ambiguous { .. }
             | Refusal::Undocumented { .. }
@@ -307,6 +313,12 @@ impl Refusal {
             Refusal::OutOfRange { verb, value, bound } => {
                 format!("{verb}: this headset takes {bound}, not {value}")
             }
+            Refusal::OutOfDeviceRange { verb, value, min, max, step } if *step == 1 => {
+                format!("{verb}: this headset takes {min} to {max}, not {value}")
+            }
+            Refusal::OutOfDeviceRange { verb, value, min, max, step } => {
+                format!("{verb}: this headset takes {min} to {max} in steps of {step}, not {value}")
+            }
             Refusal::NoEncoder { verb, why } => {
                 format!("{verb}: this daemon sends no frame for it -- {why}")
             }
@@ -323,6 +335,10 @@ impl Refusal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observed<T> {
     pub kind: u8,
+    /// The reply's length, command and type included. The type alone does not
+    /// choose a struct in this protocol -- five declare NC_ON_OFF at five
+    /// lengths -- so an encoder that mirrors a reply needs both.
+    pub len: usize,
     pub value: Option<T>,
 }
 
@@ -338,6 +354,9 @@ pub struct Facts {
     table_one: Vec<SupportFunction>,
     table_two: Vec<SupportFunction>,
     noise: Option<Observed<NoiseReport>>,
+    /// The ambient level's ranges, at the inquired type they were reported
+    /// for. See [`Facts::ambient_range`].
+    noise_capability: Option<(u8, Vec<AmbientRange>)>,
     speak_to_chat: Option<Observed<SpeakToChatReport>>,
     dsee: Option<Observed<DseeReport>>,
     equalizer: Option<Observed<EqReport>>,
@@ -359,6 +378,7 @@ impl Facts {
             table_one: Vec::new(),
             table_two: Vec::new(),
             noise: None,
+            noise_capability: None,
             speak_to_chat: None,
             dsee: None,
             equalizer: None,
@@ -392,7 +412,8 @@ impl Facts {
         match reading {
             Reading::SupportFunctions { table: Table::One, functions } => self.table_one = functions,
             Reading::SupportFunctions { table: Table::Two, functions } => self.table_two = functions,
-            Reading::Noise(report) => self.noise = Some(Observed { kind, value: Some(report) }),
+            Reading::Noise(report) => self.noise = Some(Observed { kind, len: payload.len(), value: Some(report) }),
+            Reading::NoiseCapability { kind, ranges } => self.noise_capability = Some((kind, ranges)),
             Reading::Dsee(report) => {
                 // The capability reply and the param reply are different
                 // messages at the same inquired type, and each fills half.
@@ -403,7 +424,7 @@ impl Facts {
                     },
                     None => report,
                 };
-                self.dsee = Some(Observed { kind, value: Some(merged) });
+                self.dsee = Some(Observed { kind, len: payload.len(), value: Some(merged) });
             }
             Reading::SpeakToChat(report) => {
                 let merged = match self.speak_to_chat.as_ref().and_then(|o| o.value) {
@@ -415,13 +436,13 @@ impl Facts {
                     },
                     None => report,
                 };
-                self.speak_to_chat = Some(Observed { kind, value: Some(merged) });
+                self.speak_to_chat = Some(Observed { kind, len: payload.len(), value: Some(merged) });
             }
             Reading::Equalizer(report) => {
-                self.equalizer = Some(Observed { kind, value: Some(report) })
+                self.equalizer = Some(Observed { kind, len: payload.len(), value: Some(report) })
             }
             Reading::Volume { device_level } => {
-                self.volume = Some(Observed { kind, value: Some(device_level) })
+                self.volume = Some(Observed { kind, len: payload.len(), value: Some(device_level) })
             }
             // TWO MESSAGES, ONE SLOT. The capability reply says what the
             // setting IS and the param reply says whether it is on; they arrive
@@ -448,12 +469,24 @@ impl Facts {
                     _ => return,
                 };
                 if slot.is_none() {
-                    *slot = Some(Observed { kind, value: None });
+                    *slot = Some(Observed { kind, len: payload.len(), value: None });
                 }
             }
             // No verb writes any of these, so the encoder keeps nothing.
             Reading::Device(_) | Reading::Battery(_) | Reading::Codec(_) | Reading::PairedDevices(_) => {}
         }
+    }
+
+    /// The ambient level's range in one ambient sound mode, as the headset
+    /// reported it -- but only when it reported it at the inquired type its
+    /// noise reading came from. A range stated for one NC/ASM variant is not
+    /// evidence about another.
+    pub fn ambient_range(&self, voice: bool) -> Option<AmbientRange> {
+        let (kind, ranges) = self.noise_capability.as_ref()?;
+        if self.noise.as_ref().map(|o| o.kind) != Some(*kind) {
+            return None;
+        }
+        ranges.iter().find(|r| r.voice == voice).copied()
     }
 
     pub(crate) fn advertises_one(&self, codes: &[u8]) -> bool {
@@ -525,20 +558,46 @@ impl NcAsmEdit<'_> {
     }
 }
 
-/// `NcAsmSetParamModeNcDualModeSwitchAsmSeamless` (T1:5614), the seven-byte
-/// form, field-for-field identical to the RET twin fixture 000069 carries.
+/// The ambient level's bound when the headset has not stated one: the C++
+/// daemon's 1..=20 in steps of one, which is also what libmdr and Gadgetbridge
+/// enforce. A compatibility choice, not a fact; see [`AmbientRange`].
+pub const COMPAT_AMBIENT_RANGE: AmbientRange = AmbientRange { voice: false, min: 1, max: 20, step: 1 };
+
+/// One NC/ASM write, built in the layout the headset itself last answered in.
 ///
-/// All three NC/ASM verbs land here, and each names ONE byte. The other three
-/// value bytes are echoed from the headset's own last reading, because the
-/// struct has no way to say "leave this alone".
+/// All three NC/ASM verbs land here, and each names ONE byte. The other value
+/// bytes are echoed from the headset's own last reading, because the struct
+/// has no way to say "leave this alone".
+///
+/// WHICH LAYOUT IS THE HEADSET'S CHOICE, NOT OURS. It answered NCASM_GET_PARAM
+/// at some inquired type and some length, and that pair names the SET. Three
+/// pairs are written, each on its own grounds:
+///
+///   (0x17, 7)  `NcAsmSetParamModeNcDualModeSwitchAsmSeamless` (T1:5614),
+///              field-for-field the RET twin fixture 000069 carries. MIRRORED
+///              CAPTURE.
+///   (0x19, 9)  `NcAsmSetParamModeNcDualModeSwitchAsmSeamlessNa` (T1:5634):
+///              the same five bytes, then the adaptive switch and its
+///              sensitivity, echoed. REFERENCE CLIENT: libmdr sends exactly
+///              this struct for a headset advertising noise adaptation
+///              (`HeadphonesV2.cpp` `RequestCommitV2`).
+///   (0x15, 7)  The 0x17 layout at MODE_NC_ASM_AUTO_NC_MODE_SWITCH_AND_ASM_
+///              SEAMLESS, which no struct in the header declares. THIRD
+///              PARTY: Gadgetbridge writes its WH-1000XM5 this way
+///              (`SonyProtocolImplV2.setAmbientSoundControl`).
+///
+/// The other layouts the decoder reads are refused by name. At 0x13 both SET
+/// structs are seven bytes and read offset 6 differently (`Refusal::Ambiguous`,
+/// the SET half of the collision PROVENANCE.md records). At 0x22 the reference
+/// client contradicts itself -- it reads `NcAsmRetParamAsmSeamless` at 0x22 and
+/// writes `NcAsmSetParamAsmSeamless` with the type left at its default, 0x01 --
+/// and at 0x01 nothing this daemon asks for ever answers. A write in a layout
+/// with no evidence behind it is a write that may do something else.
 fn encode_ncasm(facts: &Facts, edit: NcAsmEdit) -> Result<Outgoing, Refusal> {
     let verb = edit.verb();
     let Some(observed) = facts.noise.as_ref() else {
         return Err(Refusal::NotRead { verb, needs: "NCASM_GET_PARAM" });
     };
-    // The SET half of the collision PROVENANCE.md records. It exists here and
-    // NOT on the read side: the two RET structs are six and seven fields, so
-    // only the NTFY pair collides there, while both SET structs are seven.
     if observed.kind == 0x13 {
         return Err(Refusal::Ambiguous {
             verb,
@@ -548,9 +607,22 @@ fn encode_ncasm(facts: &Facts, edit: NcAsmEdit) -> Result<Outgoing, Refusal> {
             between: ["NcAsmSetParamNcOnOffAsmOnOff", "NcAsmSetParamNcOnOffAsmSeamless"],
         });
     }
-    if observed.kind != 0x17 {
-        return Err(Refusal::UnknownVariant { verb, family: "NC/ASM", observed: observed.kind });
-    }
+    let evidence = match (observed.kind, observed.len) {
+        (0x17, 7) => Evidence::MirroredCapture {
+            fixture: "000069",
+            set: "NcAsmSetParamModeNcDualModeSwitchAsmSeamless",
+            ret: "NcAsmRetParamModeNcDualModeSwitchAsmSeamless",
+        },
+        (0x19, 9) => Evidence::ReferenceClient {
+            set: "NcAsmSetParamModeNcDualModeSwitchAsmSeamlessNa",
+            cite: "libmdr HeadphonesV2.cpp RequestCommitV2, the noise-adaptation branch",
+        },
+        (0x15, 7) => Evidence::ThirdParty {
+            set: "NcAsmSetParam at MODE_NC_ASM_AUTO_NC_MODE_SWITCH_AND_ASM_SEAMLESS",
+            source: "Gadgetbridge SonyProtocolImplV2.setAmbientSoundControl, WH-1000XM5",
+        },
+        _ => return Err(Refusal::UnknownVariant { verb, family: "NC/ASM", observed: observed.kind }),
+    };
     let Some(now) = observed.value else {
         return Err(Refusal::NotRead { verb, needs: "a NCASM_RET_PARAM this port could read" });
     };
@@ -562,11 +634,12 @@ fn encode_ncasm(facts: &Facts, edit: NcAsmEdit) -> Result<Outgoing, Refusal> {
     // the headset is sitting in NC or ASM behind a disabled switch. Re-deriving
     // it would move a headset from ambient to cancelling the first time
     // somebody turned the feature off and on again.
-    let Some(mut asm_mode) = now.mode_byte else {
-        return Err(Refusal::NotRead { verb, needs: "a NC/ASM reply carrying a mode byte" });
+    let (Some(mut asm_mode), Some(focus_on_voice), Some(mut level)) =
+        (now.mode_byte, now.focus_on_voice, now.ambient_level)
+    else {
+        return Err(Refusal::NotRead { verb, needs: "a NC/ASM reply carrying a mode, a voice and a level" });
     };
-    let mut voice = u8::from(now.focus_on_voice);
-    let mut level = now.ambient_level;
+    let mut voice = u8::from(focus_on_voice);
 
     match edit {
         NcAsmEdit::Mode("off") => effect = 0x00,
@@ -584,30 +657,43 @@ fn encode_ncasm(facts: &Facts, edit: NcAsmEdit) -> Result<Outgoing, Refusal> {
             return Err(Refusal::NoEncoder { verb, why: leaked(other) });
         }
         NcAsmEdit::Level(value) => {
-            if !(0..=255).contains(&value) {
-                return Err(Refusal::OutOfRange { verb, value, bound: "a single byte" });
+            // THE HEADSET'S RANGE, WHEN IT HAS STATED ONE, for the ambient
+            // mode the level will apply in. Only a level edit is held to it:
+            // turning focus-on-voice on with a level the voice range does not
+            // reach is the headset's to clamp, and refusing it would make the
+            // switch unusable at levels the person never chose.
+            let range = facts.ambient_range(focus_on_voice).unwrap_or(COMPAT_AMBIENT_RANGE);
+            if !range.admits(value) {
+                return Err(Refusal::OutOfDeviceRange {
+                    verb,
+                    value,
+                    min: range.min,
+                    max: range.max,
+                    step: range.step,
+                });
             }
+            // `admits` bounds it to 0..=255 already: min and max are bytes.
             level = value as u8;
         }
         NcAsmEdit::FocusOnVoice(on) => voice = u8::from(on),
     }
 
-    // ValueChangeStatus at offset 2. CHANGED (0x01) is what the captured RET
-    // carries and what a settled value means; the reference does not say what
-    // a client sends, so this echoes the headset's own last word rather than
-    // inventing one. `now.settled` IS that byte, decoded.
-    let change = u8::from(now.settled);
-    Ok(Outgoing::new(
-        DataType::DataMdr,
-        Evidence::MirroredCapture {
-            fixture: "000069",
-            set: "NcAsmSetParamModeNcDualModeSwitchAsmSeamless",
-            ret: "NcAsmRetParamModeNcDualModeSwitchAsmSeamless",
-        },
-        0x68,
-        0x17,
-        &[change, effect, asm_mode, voice, level],
-    ))
+    // ValueChangeStatus at offset 2: CHANGED (0x01), always. It used to be
+    // echoed from the headset's last reading, which made a reading caught
+    // mid-change -- UNDER_CHANGING, as a headset reports while its own slider
+    // is moving -- into a write that said it was still moving. libmdr sends
+    // CHANGED for every NC/ASM write (`HeadphonesV2.cpp` `RequestCommitV2`)
+    // and Gadgetbridge sends 0x01; fixture 000069 carries 0x01 as well.
+    let change = 0x01;
+    let mut body = vec![change, effect, asm_mode, voice, level];
+    if observed.kind == 0x19 {
+        // The two noise-adaptation fields, echoed: no verb moves them.
+        let (Some(adaptive), Some(sensitivity)) = (now.adaptive, now.adaptive_sensitivity) else {
+            return Err(Refusal::NotRead { verb, needs: "a noise-adaptation reply carrying both its fields" });
+        };
+        body.extend_from_slice(&[u8::from(adaptive), sensitivity]);
+    }
+    Ok(Outgoing::new(DataType::DataMdr, evidence, 0x68, observed.kind, &body))
 }
 
 /// A word the command language cannot produce. Kept as a named function so the
@@ -1095,8 +1181,13 @@ pub fn feature_gets(facts: &Facts) -> Vec<Outgoing> {
     // its advertised function names, and the REPLY is what the encoder then
     // echoes. This is the one place a function-to-type correspondence is used,
     // and it is used to ask a question rather than to write a value.
-    if facts.advertises_one(&[0x6B]) {
-        out.push(get(DataType::DataMdr, 0x66, 0x17, "NcAsmGetParam"));
+    if let Some(kind) = ncasm_type(facts) {
+        out.push(get(DataType::DataMdr, 0x66, kind, "NcAsmGetParam"));
+        // And the ambient level's range at the same type: NcAsmGetCapability
+        // (T1:4842), a plain two-byte GET. Neither reference client asks for
+        // it; this does because it is the one place a headset says what its
+        // ambient levels are. See `payload::decode_noise_capability`.
+        out.push(get(DataType::DataMdr, 0x60, kind, "NcAsmGetCapability"));
     }
     if facts.advertises_one(&[0x50, 0x51, 0x52, 0x53, 0x55, 0x56, 0x57]) {
         out.push(get(DataType::DataMdr, 0x50, 0x00, "EqEbbGetCapability"));
@@ -1145,6 +1236,24 @@ pub fn feature_gets(facts: &Facts) -> Vec<Outgoing> {
         }
     }
     out
+}
+
+/// The inquired type to ask NC/ASM at, from the function the headset
+/// advertises, or `None` when it advertises none this port reads.
+///
+/// libmdr's order (`HeadphonesV2.cpp` `RequestInitV2`): 0x6B
+/// (MODE_NC_ASM_..._LEVEL_ADJUSTMENT) asks 0x17, 0x6D (the noise-adaptation
+/// variant) asks 0x19, 0x67 (AMBIENT_SOUND_MODE_LEVEL_ADJUSTMENT) asks 0x22.
+/// Then 0x68 (MODE_NC_ASM_..._DUAL_AUTO_...), which libmdr does not ask about
+/// at all, asks 0x15 -- the type its name pairs with, and where Gadgetbridge
+/// drives a WH-1000XM5. Asking is safe where writing might not be: a GET
+/// carries no value, and whatever type the reply comes back at is what the
+/// encoder then mirrors.
+fn ncasm_type(facts: &Facts) -> Option<u8> {
+    [(0x6Bu8, 0x17u8), (0x6D, 0x19), (0x67, 0x22), (0x68, 0x15)]
+        .into_iter()
+        .find(|(function, _)| facts.advertises_one(&[*function]))
+        .map(|(_, kind)| kind)
 }
 
 /// `GsGetCapability` (T1:4129): THREE bytes, not two.

@@ -211,8 +211,8 @@ fn the_captured_noise_frame_says_the_feature_is_off() {
             // and calling that "ambient" would put a bar on the panel for a
             // filter doing nothing.
             assert_eq!(noise.mode, NoiseMode::Off);
-            assert_eq!(noise.ambient_level, 20);
-            assert!(!noise.focus_on_voice, "AmbientSoundMode::NORMAL");
+            assert_eq!(noise.ambient_level, Some(20));
+            assert_eq!(noise.focus_on_voice, Some(false), "AmbientSoundMode::NORMAL");
             assert!(noise.settled, "ValueChangeStatus::CHANGED");
         }
         other => panic!("the NC/ASM frame decoded as {other:?}"),
@@ -231,7 +231,7 @@ fn the_total_effect_switch_decides_the_mode() {
         p[4] = mode;
         p[5] = ambient;
         match payload::decode(MDR, &p) {
-            Reading::Noise(n) => (n.mode, n.focus_on_voice),
+            Reading::Noise(n) => (n.mode, n.focus_on_voice == Some(true)),
             other => panic!("decoded as {other:?}"),
         }
     };
@@ -952,4 +952,104 @@ fn a_frame_nothing_decodes_has_no_grounds_and_a_header_only_decode_says_so() {
     assert_eq!(payload::grounds(MDR, &[0x23, 0x09, 0x46, 0x00, 0x46, 0x00, 0x1e, 0x1e]).map(|g| g.as_str()), Some("captured"));
     // Nothing decodes this.
     assert_eq!(payload::grounds(MDR, &[0x01, 0x00]), None);
+}
+
+#[test]
+fn the_ambient_level_range_is_read_from_the_capability_reply_and_nothing_less() {
+    // PLAN 23, ITEM 2. HEADER ONLY: no capture holds an NCASM_RET_CAPABILITY,
+    // so these are built from `AmbientSoundModeLevelSet` (T1:2317) in an
+    // `MDRPodArray` (a count byte, then packed elements, Protocol.hpp:409).
+    // 61 17 02 | 00 01 14 01 | 01 01 0a 01: NORMAL 1..=20 by 1, VOICE 1..=10 by 1.
+    let good = [0x61, 0x17, 0x02, 0x00, 0x01, 0x14, 0x01, 0x01, 0x01, 0x0A, 0x01];
+    match payload::decode(MDR, &good) {
+        Reading::NoiseCapability { kind, ranges } => {
+            assert_eq!(kind, 0x17);
+            assert_eq!(ranges.len(), 2);
+            assert!(!ranges[0].voice && ranges[0].min == 1 && ranges[0].max == 20 && ranges[0].step == 1);
+            assert!(ranges[1].voice && ranges[1].max == 10);
+            assert!(ranges[0].admits(20) && !ranges[0].admits(21) && !ranges[0].admits(0));
+        }
+        other => panic!("decoded as {other:?}"),
+    }
+    // A step is honoured, not just the ends.
+    let stepped = payload::AmbientRange { voice: false, min: 2, max: 20, step: 2 };
+    assert!(stepped.admits(4) && !stepped.admits(5) && !stepped.admits(1));
+
+    // Everything a range must not be is refused whole.
+    let refused: [(&str, Vec<u8>); 8] = [
+        ("a length that is not the count's", vec![0x61, 0x17, 0x02, 0x00, 0x01, 0x14, 0x01]),
+        ("a zero step", vec![0x61, 0x17, 0x01, 0x00, 0x01, 0x14, 0x00]),
+        ("min above max", vec![0x61, 0x17, 0x01, 0x00, 0x14, 0x01, 0x01]),
+        ("a mode that is neither NORMAL nor VOICE", vec![0x61, 0x17, 0x01, 0x02, 0x01, 0x14, 0x01]),
+        ("a mode listed twice", vec![0x61, 0x17, 0x02, 0x00, 0x01, 0x14, 0x01, 0x00, 0x01, 0x0A, 0x01]),
+        ("no ranges at all", vec![0x61, 0x17, 0x00]),
+        ("a type outside the seamless family", vec![0x61, 0x01, 0x01, 0x00, 0x01, 0x14, 0x01]),
+        // 0x13 has a second struct with one-byte modes and no ranges: 3 + n.
+        ("the 0x13 on/off form", vec![0x61, 0x13, 0x02, 0x00, 0x01]),
+    ];
+    for (why, bytes) in refused {
+        assert!(matches!(payload::decode(MDR, &bytes), Reading::Unhandled { .. }), "{why} was read as a range");
+    }
+    // And on table 2 the same byte is LEA_RET_CAPABILITY.
+    assert!(matches!(payload::decode(DataType::DataMdrNo2, &good), Reading::Unhandled { .. }));
+}
+
+#[test]
+fn each_nc_asm_layout_reads_its_own_offsets() {
+    // PLAN 23, ITEM 3. Built on the captured 0x17 frame's values where the
+    // layouts share them. See `decode_noise` for what each stands on.
+    let noise = |bytes: &[u8]| match payload::decode(MDR, bytes) {
+        Reading::Noise(n) => n,
+        other => panic!("{bytes:02x?} decoded as {other:?}"),
+    };
+
+    // 0x15, Gadgetbridge's WH-1000XM5: the 0x17 offsets. On, ASM, voice, 7.
+    let n = noise(&[0x67, 0x15, 0x01, 0x01, 0x01, 0x01, 0x07]);
+    assert_eq!((n.mode, n.focus_on_voice, n.ambient_level), (NoiseMode::Ambient, Some(true), Some(7)));
+
+    // 0x19, noise adaptation: the same five, then the adaptive switch and its
+    // sensitivity at the END -- the level stays at offset 6.
+    let n = noise(&[0x67, 0x19, 0x01, 0x01, 0x00, 0x00, 0x0C, 0x01, 0x02]);
+    assert_eq!((n.mode, n.ambient_level), (NoiseMode::Anc, Some(12)));
+    assert_eq!((n.adaptive, n.adaptive_sensitivity), (Some(true), Some(0x02)));
+
+    // 0x22, ambient only: no mode byte, so on means ambient.
+    let n = noise(&[0x67, 0x22, 0x01, 0x01, 0x00, 0x05]);
+    assert_eq!((n.mode, n.mode_byte, n.ambient_level), (NoiseMode::Ambient, None, Some(5)));
+
+    // 0x13 at seven bytes: an NC switch where the others have a mode byte.
+    assert_eq!(noise(&[0x67, 0x13, 0x01, 0x01, 0x01, 0x00, 0x09]).mode, NoiseMode::Anc);
+    assert_eq!(noise(&[0x67, 0x13, 0x01, 0x01, 0x00, 0x00, 0x09]).mode, NoiseMode::Ambient);
+
+    // 0x01 at five: cancelling or nothing, and no level to publish.
+    let n = noise(&[0x67, 0x01, 0x01, 0x01, 0x01]);
+    assert_eq!((n.mode, n.ambient_level, n.focus_on_voice), (NoiseMode::Anc, None, None));
+    assert_eq!(noise(&[0x67, 0x01, 0x01, 0x01, 0x00]).mode, NoiseMode::Off);
+
+    // Total effect off beats every layout's mode.
+    assert_eq!(noise(&[0x67, 0x19, 0x01, 0x00, 0x00, 0x00, 0x0C, 0x01, 0x02]).mode, NoiseMode::Off);
+
+    // A length no struct at that type has is not read.
+    for bytes in [&[0x67u8, 0x15, 0x01, 0x01, 0x01, 0x01][..], &[0x67, 0x19, 0x01, 0x01, 0x00, 0x00, 0x0C][..]] {
+        assert!(matches!(payload::decode(MDR, bytes), Reading::Unhandled { .. }), "{bytes:02x?}");
+    }
+    // And the 0x13 NOTIFY at seven bytes is still the reference's collision.
+    assert!(matches!(
+        payload::decode(MDR, &[0x69, 0x13, 0x01, 0x01, 0x01, 0x00, 0x09]),
+        Reading::Ambiguous { .. }
+    ));
+}
+
+#[test]
+fn each_nc_asm_layout_reports_what_it_stands_on() {
+    use payload::Grounds;
+    let g = |bytes: &[u8]| payload::grounds(MDR, bytes);
+    assert_eq!(g(&[0x67, 0x17, 0x01, 0x00, 0x01, 0x00, 0x14]), Some(Grounds::Captured));
+    assert_eq!(g(&[0x67, 0x15, 0x01, 0x01, 0x01, 0x01, 0x07]), Some(Grounds::ThirdParty));
+    assert_eq!(g(&[0x67, 0x19, 0x01, 0x01, 0x00, 0x00, 0x0C, 0x01, 0x02]), Some(Grounds::ReferenceClient));
+    assert_eq!(g(&[0x67, 0x22, 0x01, 0x01, 0x00, 0x05]), Some(Grounds::ReferenceClient));
+    assert_eq!(g(&[0x67, 0x01, 0x01, 0x01, 0x01]), Some(Grounds::HeaderOnly));
+    assert_eq!(g(&[0x61, 0x17, 0x01, 0x00, 0x01, 0x14, 0x01]), Some(Grounds::HeaderOnly));
+    // A volunteered change stands where its reply does.
+    assert_eq!(g(&[0x69, 0x15, 0x01, 0x01, 0x01, 0x01, 0x07]), Some(Grounds::ThirdParty));
 }

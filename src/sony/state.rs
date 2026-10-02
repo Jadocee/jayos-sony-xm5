@@ -381,10 +381,10 @@ pub struct Noise {
     /// What the reference DOES say is that the bound is per-device and
     /// per-mode. `AmbientSoundModeLevelSet` (T1:2317) pairs an
     /// `AmbientSoundMode` with a `Range { min, max, step }`, and a headset
-    /// delivers those in its NCASM_RET_CAPABILITY reply -- command 0x61, which
-    /// no frame in this corpus carries. So a device whose ambient scale runs
-    /// to 19 or to 32 would be clamped wrongly here, and the fix is one
-    /// capture of a 0x61 frame rather than a different constant.
+    /// delivers those in its NCASM_RET_CAPABILITY reply -- command 0x61. The
+    /// daemon asks for it, holds writes to it, and publishes the range in
+    /// force as [`State::ambient_range`]; no frame in this corpus carries one,
+    /// so that decode is header-only until a capture does.
     pub ambient_level: i32,
     pub focus_on_voice: bool,
     pub adaptive: bool,
@@ -512,9 +512,37 @@ pub struct State {
     /// capture carries two `KUWABARA` and two `KOMAHUANG-PC2`. The headset's
     /// own address would be redundant in a list of peers and is not sent.
     pub paired_devices: Vec<PairedDevice>,
+    /// The ambient level's legal values in the ambient mode the headset is
+    /// in: what it stated in its NCASM_RET_CAPABILITY reply, or the
+    /// compatibility range 1..=20 when it has stated none. Plan 23, item 2.
+    ///
+    /// TOP LEVEL AND NOT INSIDE `noise`, because `noise` is the C++ daemon's
+    /// object and this daemon's additions are kept apart from the
+    /// reference's shape so `sony_contract.rs` can subtract them. A page
+    /// draws its level control from this rather than from a 20 of its own.
+    pub ambient_range: AmbientRange,
     /// The last thing that went wrong, or empty. A page shows this instead of
     /// looking broken when there is nothing to show.
     pub last_error: String,
+}
+
+/// The ambient level's range, as the document publishes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AmbientRange {
+    pub min: u8,
+    pub max: u8,
+    pub step: u8,
+    /// Whether the headset stated it. `source` in the document: `device`, or
+    /// `compat` for the 1..=20 fallback.
+    pub from_device: bool,
+}
+
+impl Default for AmbientRange {
+    /// The compatibility range: the C++ daemon's, and the command language's.
+    fn default() -> AmbientRange {
+        let c = crate::mdr::encode::COMPAT_AMBIENT_RANGE;
+        AmbientRange { min: c.min, max: c.max, step: c.step, from_device: false }
+    }
 }
 
 impl Default for State {
@@ -533,6 +561,7 @@ impl Default for State {
             connection: Connection::default(),
             general_settings: Vec::new(),
             paired_devices: Vec::new(),
+            ambient_range: AmbientRange::default(),
             last_error: String::new(),
         }
     }
@@ -776,6 +805,15 @@ pub fn serialize(state: &State, daemon_version: &str) -> String {
         );
     }
     out.push(']');
+    let r = state.ambient_range;
+    let _ = write!(
+        out,
+        ",\"ambient_range\":{{\"min\":{},\"max\":{},\"step\":{},\"source\":\"{}\"}}",
+        r.min,
+        r.max,
+        r.step,
+        if r.from_device { "device" } else { "compat" }
+    );
     let _ = write!(out, ",\"last_error\":\"{}\"}}", json_escape(&state.last_error));
     // The trailing newline is part of the document: the file ends in exactly
     // this one, the `"}\n"` the reference's `serializeState` (state.cpp)

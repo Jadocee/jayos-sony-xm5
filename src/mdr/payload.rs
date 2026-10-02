@@ -32,16 +32,23 @@
 //!
 //! WHAT IS DECODED, AND WHAT IS NOT
 //!
-//! Very little, and each entry says which of two grounds it stands on.
+//! Each decoder says which grounds it stands on, and [`grounds`] says the same
+//! to a program. Four kinds:
 //!
 //! CAPTURED means a frame a real WF-1000XM5 sent was decoded byte by byte and
 //! the values came out sensible: the two threshold battery forms (0x09, 0x0A),
-//! the one NC/ASM variant (0x17), the model name and firmware version, the
+//! the NC/ASM variant at 0x17, the model name and firmware version, the
 //! equaliser preset with its band steps, the music volume, the A2DP codec,
-//! both support-function tables, both halves of DSEE and both halves of
-//! Speak-to-Chat. HEADER ONLY means the layout is transcribed and nothing has
-//! been seen sending it: the four plain battery forms, which are the ones an
-//! over-ear reports and which no capture in this corpus covers.
+//! both support-function tables, both halves of DSEE, both halves of
+//! Speak-to-Chat, the named general settings and the paired-device list.
+//! [`CAPTURED`] lists the keys, held to the corpus by a test.
+//!
+//! REFERENCE CLIENT means the meaning is libmdr's: it decodes the key this
+//! way, and people run it against real headsets. THIRD PARTY means another
+//! project reports a real headset sending it. HEADER ONLY means the layout is
+//! transcribed and nothing has been seen sending it: the four plain battery
+//! forms, which are the ones an over-ear reports and which no capture in this
+//! corpus covers, and the ambient level's capability reply.
 //!
 //! Everything else is [`Reading::Unhandled`]. That is a panel showing "unknown"
 //! rather than a plausible-looking number, and it is recoverable by capturing
@@ -80,6 +87,10 @@ pub enum Command {
     EqEbbRetStatus,
     EqEbbRetParam,
     EqEbbNtfyParam,
+    /// `NCASM_RET_CAPABILITY` (0x61): the ambient level's range, per mode.
+    /// TABLE ONE ONLY -- on table 2 the same byte is `LEA_RET_CAPABILITY`, and
+    /// the table gate in [`decode`] keeps the two apart.
+    NcAsmRetCapability,
     NcAsmRetParam,
     NcAsmNtfyParam,
     PlayRetStatus,
@@ -121,6 +132,7 @@ impl Command {
             0x53 => Command::EqEbbRetStatus,
             0x57 => Command::EqEbbRetParam,
             0x59 => Command::EqEbbNtfyParam,
+            0x61 => Command::NcAsmRetCapability,
             0x67 => Command::NcAsmRetParam,
             0x69 => Command::NcAsmNtfyParam,
             0xA3 => Command::PlayRetStatus,
@@ -157,6 +169,7 @@ impl Command {
             Command::EqEbbRetStatus => 0x53,
             Command::EqEbbRetParam => 0x57,
             Command::EqEbbNtfyParam => 0x59,
+            Command::NcAsmRetCapability => 0x61,
             Command::NcAsmRetParam => 0x67,
             Command::NcAsmNtfyParam => 0x69,
             Command::PlayRetStatus => 0xA3,
@@ -339,16 +352,48 @@ pub struct NoiseReport {
     /// Found by the write path's round trip on its first run, which is what
     /// that test is for.
     pub mode_byte: Option<u8>,
-    /// The ambient sound level as the wire carries it, NOT a percentage. See
-    /// `sony::state::Noise::ambient_level` for why this port's 1..=20 bound is
-    /// an interop choice rather than a fact about the hardware.
-    pub ambient_level: u8,
+    /// The ambient sound level as the wire carries it, NOT a percentage, or
+    /// `None` on the one variant that has no level (NC on/off only). See
+    /// [`AmbientRange`] for where the level's real bound comes from.
+    pub ambient_level: Option<u8>,
     /// `AmbientSoundMode::VOICE`: the filter that keeps speech and drops the
-    /// rest.
-    pub focus_on_voice: bool,
+    /// rest. `None` where the variant has no ambient sound mode.
+    pub focus_on_voice: Option<bool>,
     /// `ValueChangeStatus::CHANGED`. False means the headset is mid-change and
     /// this reading is about to be superseded.
     pub settled: bool,
+    /// The noise-adaptation variant (0x19) only: `ncAsmOnOffValue` at offset
+    /// 7, which libmdr reads as automatic ambient sound
+    /// (`mNcAsmAutoAsmEnabled`, `HeadphonesV2T1.cpp:131-152`).
+    pub adaptive: Option<bool>,
+    /// The noise-adaptation variant only: `NoiseAdaptiveSensitivity` at
+    /// offset 8 (T1:1203: STANDARD 0x00, HIGH 0x01, LOW 0x02), verbatim.
+    pub adaptive_sensitivity: Option<u8>,
+}
+
+/// One ambient sound mode's level range, as a headset's
+/// `NCASM_RET_CAPABILITY` reply states it.
+///
+/// `AmbientSoundModeLevelSet` (T1:2317): an `AmbientSoundMode` (NORMAL 0x00,
+/// VOICE 0x01) and a `Range { min, max, step }` (`ProtocolV2.hpp:93`). This is
+/// where the ambient level's bound actually lives -- per device and per mode
+/// -- and why `ambient-level 1..20` in the command language is a
+/// compatibility contract with the C++ daemon rather than a fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AmbientRange {
+    /// `AmbientSoundMode::VOICE`: this range applies with focus on voice on.
+    pub voice: bool,
+    pub min: u8,
+    pub max: u8,
+    pub step: u8,
+}
+
+impl AmbientRange {
+    /// Whether `level` is one a headset with this range accepts.
+    pub fn admits(self, level: i32) -> bool {
+        let (min, max, step) = (i32::from(self.min), i32::from(self.max), i32::from(self.step));
+        (min..=max).contains(&level) && (level - min) % step == 0
+    }
 }
 
 /// A string as the wire carries it: one length byte, then that many bytes.
@@ -923,6 +968,10 @@ pub enum Reading {
     /// - 000039: `d1 d2 00 01 12` then `MULTIPOINT_SETTING`, `29` then
     ///   `MULTIPOINT_SETTING_SUMMARY_LDAC_AVAILABLE`
     GeneralSettingInfo(GeneralSetting),
+    /// The ambient level's range per ambient sound mode, at the inquired type
+    /// the headset answered. HEADER ONLY: no capture holds an
+    /// `NCASM_RET_CAPABILITY`. See [`decode_noise_capability`].
+    NoiseCapability { kind: u8, ranges: Vec<AmbientRange> },
     /// Every device this headset is paired with, and which of them it is
     /// talking to. TABLE TWO -- see [`decode_paired_devices`].
     ///
@@ -1091,6 +1140,7 @@ pub fn decode(data_type: super::DataType, payload: &[u8]) -> Reading {
     match message.command.canonical() {
         Command::PowerRetStatus => decode_battery(&message).unwrap_or(unhandled),
         Command::NcAsmRetParam => decode_noise(&message).unwrap_or(unhandled),
+        Command::NcAsmRetCapability => decode_noise_capability(&message).unwrap_or(unhandled),
         Command::ConnectRetDeviceInfo => decode_device_info(&message).unwrap_or(unhandled),
         Command::EqEbbRetParam => decode_equalizer(&message).unwrap_or(unhandled),
         Command::GsRetCapability => decode_general_setting_info(&message).unwrap_or(unhandled),
@@ -1681,92 +1731,205 @@ fn decode_battery(message: &Message) -> Option<Reading> {
     Some(Reading::Battery(out))
 }
 
-/// `NcAsmRetParam*`, the variants with a capture behind them.
+/// `NcAsmRetParam*`: the noise-control reading, in each layout a WH-1000XM5
+/// has been seen or credibly reported to answer with.
 ///
-/// Only 0x17 is captured. The others in this family are the reason the module
-/// header talks about the length: five different structs declare
-/// `NC_ON_OFF` (0x01) with lengths 4, 6, 8, 7 and 5, so a decoder that took
-/// the kind byte alone would pick one of five layouts at random.
+/// KEYED ON (TYPE, LENGTH), because the type alone does not choose a struct:
+/// five declare `NC_ON_OFF` (0x01) with lengths 4, 6, 8, 7 and 5, and two
+/// declare 0x13 with lengths 6 and 7. The length picks one.
 ///
-/// The 0x17 key is itself one of the 37 collisions -- two structs claim it --
-/// but they differ only in the NAME of the enum at offset 4: `NcAsmMode` and
-/// `NcNcssAsmMode` are both `{ NC = 0x00, ASM = 0x01, OUT_OF_RANGE = 0xFF }`.
-/// So the decode is the same either way, which is why this key is not in
-/// `AMBIGUOUS` and why that was checked rather than assumed.
+/// WHY MORE THAN THE CAPTURED ONE. This decoded 0x17 alone for as long as the
+/// corpus was the only evidence, on the principle that a layout read off the
+/// header is a guess. Two things changed that. The reference CLIENT decodes
+/// 0x19 and 0x22 (libmdr `HandleNcAsmParamT1`, `HeadphonesV2T1.cpp:95-180`),
+/// and people run it against real headsets. And the WH-1000XM5 does not
+/// answer at one type: Gadgetbridge drives it at 0x15
+/// (`SonyProtocolImplV2.java`, `handleAmbientSoundControl`), a WH-1000XM5
+/// was observed answering 0x17 (snizovtsev/xm5-mode-switch), and XMDeck added
+/// 0x19 for it. A headset whose reading this refused is a headset whose noise
+/// control the panel can neither show nor change, and that is the device this
+/// port is for. Each row says what it stands on; `grounds()` says the same to
+/// a program.
+///
+///   (0x17, 7)  MODE_NC_ASM_DUAL_NC_MODE_SWITCH_AND_ASM_SEAMLESS. CAPTURED:
+///              fixture mdr-packet-…-000069, the corpus's only NCASM frame:
+///              67 17 01 00 01 00 14 -- settled, total effect off, mode ASM,
+///              normal (not voice), level 20. Two structs claim this key and
+///              differ only in the NAME of the enum at offset 4 (`NcAsmMode`,
+///              `NcNcssAsmMode`, both NC 0x00 / ASM 0x01), so they decode alike.
+///   (0x15, 7)  MODE_NC_ASM_AUTO_NC_MODE_SWITCH_AND_ASM_SEAMLESS. THIRD PARTY:
+///              no struct in the header declares 0x15; Gadgetbridge reads its
+///              WH-1000XM5 here with the 0x17 offsets.
+///   (0x19, 9)  ..._SEAMLESS_NA, noise adaptation. REFERENCE CLIENT. Its two
+///              extra fields are at the END, offsets 7 and 8 -- a first draft
+///              of this table moved the level to 7 and would have read it out
+///              of an adaptive-sensitivity byte.
+///   (0x22, 6)  ASM_SEAMLESS, ambient only. REFERENCE CLIENT: libmdr reads it
+///              as `NcAsmRetParamAsmSeamless`, whose declared type is the
+///              unpinned NC_ON_OFF, which is why an earlier note here called
+///              the key a message that does not exist. libmdr asks for it at
+///              0x22 and decodes what comes back.
+///   (0x13, 7)  NC_ON_OFF_AND_ASM_SEAMLESS. HEADER ONLY, pinned (T1:5505):
+///              total effect, then NC on or off, then the ambient mode and
+///              level. The 0x13 NOTIFY collides at this length (`AMBIGUOUS`)
+///              and is refused before it gets here.
+///   (0x01, 5)  NC_ON_OFF, cancelling and nothing else. HEADER ONLY, pinned
+///              (T1:5469): total effect, NC on or off. No ambient fields.
+///
+/// Only the first three are WRITTEN; see `mdr::encode::encode_ncasm`.
 fn decode_noise(message: &Message) -> Option<Reading> {
     let kind = message.kind?;
     let body = message.body;
 
-    // ONE VARIANT, and the shortness of this table is the point.
-    //
-    // A first draft of it had four entries and three of them were wrong, which
-    // is a good measure of how far the header can be read without a capture:
-    //
-    //   (0x19, 9)  the "NA" variant. Its extra two fields are at the END, at
-    //              offsets 7 and 8, so the ambient sound mode and level stay
-    //              at 5 and 6 -- the draft moved them to 7 and 8 and would
-    //              have read the ambient level out of an adaptive-sensitivity
-    //              byte.
-    //   (0x22, 6)  `NcAsmRetParamAsmSeamless`, keyed on ASM_SEAMLESS = 0x22.
-    //              That struct declares NC_ON_OFF (0x01), not 0x22, and 0x22
-    //              is declared by NO struct in the header at all. The entry
-    //              named a message that does not exist.
-    //   (0x16, 8)  correct, and correct by luck rather than by checking.
-    //
-    // The NcAsm family is where the header is least trustworthy: five structs
-    // declare NC_ON_OFF (0x01) with five different lengths, two more declare a
-    // type that contradicts their own name, and two enum values are declared
-    // by nothing. So this decodes the one variant a real device was recorded
-    // sending and reports the rest as Unhandled, which is a headset whose noise
-    // mode the panel shows as unknown -- honest, and recoverable by capturing
-    // one frame from the device in question.
-    let (change, effect, mode, ambient, level) = match (kind, message.len) {
-        // MODE_NC_ASM_DUAL_NC_MODE_SWITCH_AND_ASM_SEAMLESS, seven bytes.
-        // Fixture mdr-packet-…-000069, the corpus's only NCASM frame:
-        // 67 17 01 00 01 00 14 -- settled, total effect off, mode ASM,
-        // normal (not voice), level 20.
-        //
-        // Two structs claim this key -- ModeNcDualModeSwitchAsmSeamless and
-        // NcNcssAsmModeNcDualModeSwitchAsmSeamless -- and they differ only in
-        // the NAME of the enum at offset 4: NcAsmMode and NcNcssAsmMode are
-        // both { NC = 0x00, ASM = 0x01, OUT_OF_RANGE = 0xFF }. Checked rather
-        // than assumed, which is why this key is not in AMBIGUOUS.
-        (0x17, 7) => (0usize, 1usize, Some(2usize), 3usize, 4usize),
+    // Offsets into the body (the payload after command and type).
+    struct Layout {
+        mode: Option<usize>,
+        nc_switch: Option<usize>,
+        ambient: Option<usize>,
+        level: Option<usize>,
+        adaptive: Option<usize>,
+        sensitivity: Option<usize>,
+    }
+    let full = |adaptive, sensitivity| Layout {
+        mode: Some(2),
+        nc_switch: None,
+        ambient: Some(3),
+        level: Some(4),
+        adaptive,
+        sensitivity,
+    };
+    let layout = match (kind, message.len) {
+        (0x17, 7) | (0x15, 7) => full(None, None),
+        (0x19, 9) => full(Some(5), Some(6)),
+        (0x22, 6) => Layout {
+            mode: None,
+            nc_switch: None,
+            ambient: Some(2),
+            level: Some(3),
+            adaptive: None,
+            sensitivity: None,
+        },
+        (0x13, 7) => Layout {
+            mode: None,
+            nc_switch: Some(2),
+            ambient: Some(3),
+            level: Some(4),
+            adaptive: None,
+            sensitivity: None,
+        },
+        (0x01, 5) => Layout {
+            mode: None,
+            nc_switch: Some(2),
+            ambient: None,
+            level: None,
+            adaptive: None,
+            sensitivity: None,
+        },
         _ => return None,
     };
 
-    let settled = *body.get(change)? == 0x01;
-    let on = *body.get(effect)? == 0x01;
-    let mode_byte = match mode {
-        Some(at) => Some(*body.get(at)?),
-        None => None,
+    let byte = |at: Option<usize>| -> Option<Option<u8>> {
+        match at {
+            Some(i) => Some(Some(*body.get(i)?)),
+            None => Some(None),
+        }
     };
-    let is_ambient = match mode_byte {
-        // NcAsmMode: NC = 0x00, ASM = 0x01.
-        Some(byte) => byte == 0x01,
-        // A variant that only does ambient sound.
-        None => true,
-    };
+    // ValueChangeStatus at 0 and NcAsmOnOffValue (the total effect) at 1, in
+    // every layout.
+    let settled = *body.first()? == 0x01;
+    let on = *body.get(1)? == 0x01;
+    let mode_byte = byte(layout.mode)?;
+    let nc_switch = byte(layout.nc_switch)?;
     // AmbientSoundMode: NORMAL = 0x00, VOICE = 0x01.
-    let focus_on_voice = *body.get(ambient)? == 0x01;
-    let ambient_level = *body.get(level)?;
+    let focus_on_voice = byte(layout.ambient)?.map(|b| b == 0x01);
+    let ambient_level = byte(layout.level)?;
+    // NcAsmOnOffValue: OFF = 0x00, ON = 0x01 -- the uninverted convention.
+    let adaptive = byte(layout.adaptive)?.map(|b| b == 0x01);
+    let adaptive_sensitivity = byte(layout.sensitivity)?;
 
-    Some(Reading::Noise(NoiseReport {
+    // Which filter is running, from whichever byte this layout has for it.
+    let cancelling = match (mode_byte, nc_switch) {
+        // NcAsmMode: NC = 0x00, ASM = 0x01.
+        (Some(mode), _) => mode == 0x00,
+        // An NC switch: on is cancelling. With ambient fields beside it, off
+        // is ambient sound; without them it is simply cancelling switched off.
+        (None, Some(nc)) => nc == 0x01,
+        // A variant that only does ambient sound.
+        (None, None) => false,
+    };
+    let mode = if !on {
         // Total effect off beats everything: the headset reports a mode and a
         // level while the whole feature is switched off, and reporting that as
         // "ambient" would put a bar on the panel for a filter doing nothing.
-        mode: if !on {
-            NoiseMode::Off
-        } else if is_ambient {
-            NoiseMode::Ambient
-        } else {
-            NoiseMode::Anc
-        },
+        NoiseMode::Off
+    } else if cancelling {
+        NoiseMode::Anc
+    } else if layout.ambient.is_some() {
+        NoiseMode::Ambient
+    } else {
+        // NC_ON_OFF with the switch off: the effect is on and nothing is
+        // running, which is off by any other name.
+        NoiseMode::Off
+    };
+
+    Some(Reading::Noise(NoiseReport {
+        mode,
         mode_byte,
         ambient_level,
         focus_on_voice,
         settled,
+        adaptive,
+        adaptive_sensitivity,
     }))
+}
+
+/// `NCASM_RET_CAPABILITY` (0x61): the ambient level's range, per mode.
+///
+/// `61 <type> <n> [mode min max step] × n` -- an `MDRPodArray` of
+/// `AmbientSoundModeLevelSet` (T1:2317), whose wire form is a count byte and
+/// then the packed elements (`Protocol.hpp:409-426`). The struct is pinned at
+/// 0x16, 0x17 and 0x19 (T1:9882-9906), and at 0x13 (T1:9954); three more
+/// declare the same body with an unpinned type (T1:9870, 9918, 9930).
+///
+/// HEADER ONLY. No capture holds one, and neither reference client asks for
+/// one: libmdr and Gadgetbridge both hard-code a maximum of 20. This port asks
+/// because the ambient level is the one control whose legal values the
+/// command language had to guess, and a headset that says what they are
+/// should be believed over the guess.
+///
+/// THE LENGTH MUST BE THE COUNT'S. At 0x13 a second struct
+/// (`NcAsmRetCapabilityNcOnOffAsmOnOff`, T1:5243) carries one-byte modes and
+/// no ranges; `3 + 4n` and `3 + n` differ for every n > 0, so the length says
+/// which arrived. A reply that is not exactly `3 + 4n` is not read.
+///
+/// AND THE RANGES MUST BE RANGES. A mode other than NORMAL or VOICE, a mode
+/// listed twice, `min > max` or a zero step is refused whole: a range this
+/// would then enforce is one no level could satisfy, or one that admits
+/// everything, and a headset that sent it is not one to take at its word.
+fn decode_noise_capability(message: &Message) -> Option<Reading> {
+    let kind = message.kind?;
+    if !matches!(kind, 0x13..=0x19 | 0x22) {
+        return None;
+    }
+    let body = message.body;
+    let count = usize::from(*body.first()?);
+    if count == 0 || body.len() != 1 + 4 * count {
+        return None;
+    }
+    let mut ranges: Vec<AmbientRange> = Vec::with_capacity(count);
+    for element in body[1..].chunks_exact(4) {
+        let voice = match element[0] {
+            0x00 => false,
+            0x01 => true,
+            _ => return None,
+        };
+        let (min, max, step) = (element[1], element[2], element[3]);
+        if min > max || step == 0 || ranges.iter().any(|r| r.voice == voice) {
+            return None;
+        }
+        ranges.push(AmbientRange { voice, min, max, step });
+    }
+    Some(Reading::NoiseCapability { kind, ranges })
 }
 
 // ── how well-founded a reading is ────────────────────────────────────────────
@@ -1846,7 +2009,23 @@ pub const CAPTURED: &[Key] = &[
 /// Keys decoded on grounds other than a capture of their own, with the
 /// citation. Everything decodable and in neither list is
 /// [`Grounds::HeaderOnly`].
-pub const OTHER_GROUNDS: &[(Key, Grounds, &str)] = &[];
+pub const OTHER_GROUNDS: &[(Key, Grounds, &str)] = &[
+    (
+        (T1, 0x67, 0x15),
+        Grounds::ThirdParty,
+        "Gadgetbridge SonyProtocolImplV2.handleAmbientSoundControl, WH-1000XM5",
+    ),
+    (
+        (T1, 0x67, 0x19),
+        Grounds::ReferenceClient,
+        "libmdr HeadphonesV2T1.cpp HandleNcAsmParamT1, MODE_NC_ASM_DUAL_NC_MODE_SWITCH_AND_ASM_SEAMLESS_NA",
+    ),
+    (
+        (T1, 0x67, 0x22),
+        Grounds::ReferenceClient,
+        "libmdr HeadphonesV2T1.cpp HandleNcAsmParamT1, ASM_SEAMLESS",
+    ),
+];
 
 /// The grounds a decoded frame stands on, or `None` when nothing decodes it.
 pub fn grounds(data_type: super::DataType, payload: &[u8]) -> Option<Grounds> {

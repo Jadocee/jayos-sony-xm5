@@ -154,10 +154,10 @@ fn the_emitted_frame_decodes_back_to_what_was_asked_for() {
             matches!(r, Reading::Noise(n) if n.mode == payload::NoiseMode::Off)
         }),
         (Verb::AmbientLevel(7), |r| {
-            matches!(r, Reading::Noise(n) if n.ambient_level == 7)
+            matches!(r, Reading::Noise(n) if n.ambient_level == Some(7))
         }),
         (Verb::FocusOnVoice(true), |r| {
-            matches!(r, Reading::Noise(n) if n.focus_on_voice)
+            matches!(r, Reading::Noise(n) if n.focus_on_voice == Some(true))
         }),
         (Verb::SpeakToChat(true), |r| {
             matches!(r, Reading::SpeakToChat(s) if s.enabled == Some(payload::Switch::On))
@@ -879,4 +879,122 @@ fn only_table_one(codes: &[u8]) -> Facts {
     let mut facts = Facts::blank();
     facts.observe(DataType::DataMdr, &payload);
     facts
+}
+
+#[test]
+fn an_over_ear_headset_is_asked_for_its_one_battery_and_not_for_three() {
+    // PLAN 23, ITEM 1, the asking half. A WH-1000XM5 advertises a single
+    // battery (Gadgetbridge's coordinator says `BatterySingle`; libmdr's
+    // RequestSyncV2 asks BATTERY for BATTERY_LEVEL_INDICATOR and
+    // BATTERY_WITH_THRESHOLD for BATTERY_LEVEL_WITH_THRESHOLD). Whichever of
+    // the two it advertises, POWER_GET_STATUS goes out at that type and at no
+    // earbud type -- the corpus's two batteries answer at 0x09 and 0x0A, and a
+    // headband that was asked for those would be asked about parts it has not
+    // got.
+    for (function, kind) in [(0x20u8, 0x00u8), (0x28, 0x08)] {
+        let gets = encode::feature_gets(&only_table_one(&[function]));
+        let power: Vec<Vec<u8>> =
+            gets.iter().filter(|g| g.command() == Some(0x22)).map(|g| g.payload.clone()).collect();
+        assert_eq!(power, vec![vec![0x22, kind]], "function {function:#04x}: {power:02x?}");
+    }
+}
+
+/// Facts from a support table and the NC/ASM frames a headset answered with.
+fn ncasm_facts(functions: &[u8], frames: &[&[u8]]) -> Facts {
+    let mut facts = only_table_one(functions);
+    for frame in frames {
+        facts.observe(DataType::DataMdr, frame);
+    }
+    facts
+}
+
+#[test]
+fn nc_asm_is_asked_at_the_type_the_advertised_function_names() {
+    // PLAN 23, ITEM 3, the asking half. libmdr's order, then 0x68 -> 0x15,
+    // the type Gadgetbridge drives a WH-1000XM5 at. The capability GET goes
+    // out at the same type (item 2).
+    let asked = |functions: &[u8]| -> Vec<Vec<u8>> {
+        encode::feature_gets(&only_table_one(functions))
+            .into_iter()
+            .filter(|g| matches!(g.command(), Some(0x66) | Some(0x60)))
+            .map(|g| g.payload)
+            .collect()
+    };
+    assert_eq!(asked(&[0x6B]), vec![vec![0x66, 0x17], vec![0x60, 0x17]]);
+    assert_eq!(asked(&[0x6D]), vec![vec![0x66, 0x19], vec![0x60, 0x19]]);
+    assert_eq!(asked(&[0x67]), vec![vec![0x66, 0x22], vec![0x60, 0x22]]);
+    assert_eq!(asked(&[0x68]), vec![vec![0x66, 0x15], vec![0x60, 0x15]]);
+    // Both 0x6B and 0x6D: libmdr asks 0x17 first, and so does this.
+    assert_eq!(asked(&[0x6D, 0x6B]), vec![vec![0x66, 0x17], vec![0x60, 0x17]]);
+    // Nothing NC/ASM advertised: nothing asked.
+    assert!(asked(&[0x20]).is_empty());
+}
+
+#[test]
+fn an_nc_asm_write_mirrors_the_layout_the_headset_answered_in() {
+    // PLAN 23, ITEM 3, the writing half: three layouts, each on its own
+    // grounds, and the rest refused by name.
+    let write = |facts: &Facts, verb: Verb| encode::encode(facts, &verb);
+
+    // 0x19, noise adaptation: five bytes, then the two adaptation fields
+    // echoed. ValueChangeStatus is CHANGED even though the reading was
+    // caught mid-change (0x00 at offset 2).
+    let facts = ncasm_facts(&[0x6D], &[&[0x67, 0x19, 0x00, 0x01, 0x01, 0x00, 0x0C, 0x01, 0x02]]);
+    let out = write(&facts, Verb::Noise("anc".into())).expect("it encodes");
+    assert_eq!(out.payload, vec![0x68, 0x19, 0x01, 0x01, 0x00, 0x00, 0x0C, 0x01, 0x02]);
+    assert_eq!(out.evidence.tier(), "reference-client");
+
+    // 0x15, Gadgetbridge's WH-1000XM5 layout: the 0x17 offsets at 0x15.
+    let facts = ncasm_facts(&[0x68], &[&[0x67, 0x15, 0x01, 0x01, 0x00, 0x00, 0x0A]]);
+    let out = write(&facts, Verb::FocusOnVoice(true)).expect("it encodes");
+    assert_eq!(out.payload, vec![0x68, 0x15, 0x01, 0x01, 0x00, 0x01, 0x0A]);
+    assert_eq!(out.evidence.tier(), "third-party");
+
+    // 0x17, the captured layout, is unchanged except that a mid-change
+    // reading no longer becomes a mid-change write.
+    let facts = ncasm_facts(&[0x6B], &[&[0x67, 0x17, 0x00, 0x01, 0x01, 0x00, 0x14]]);
+    let out = write(&facts, Verb::AmbientLevel(5)).expect("it encodes");
+    assert_eq!(out.payload, vec![0x68, 0x17, 0x01, 0x01, 0x01, 0x00, 0x05]);
+    assert_eq!(out.evidence.tier(), "mirrored-capture");
+
+    // 0x22 and 0x01 are read, and not written.
+    for frame in [&[0x67u8, 0x22, 0x01, 0x01, 0x00, 0x05][..], &[0x67, 0x01, 0x01, 0x01, 0x01][..]] {
+        let facts = ncasm_facts(&[0x67], &[frame]);
+        assert!(
+            matches!(write(&facts, Verb::Noise("off".into())), Err(Refusal::UnknownVariant { .. })),
+            "{frame:02x?} was written"
+        );
+    }
+}
+
+#[test]
+fn the_ambient_level_is_held_to_the_range_the_headset_stated() {
+    // PLAN 23, ITEM 2. A headset that says its ambient level runs 1..=12 in
+    // NORMAL and 2..=10 in steps of two with focus on voice is held to that.
+    let reading: &[u8] = &[0x67, 0x17, 0x01, 0x01, 0x01, 0x00, 0x05];
+    let capability: &[u8] = &[0x61, 0x17, 0x02, 0x00, 0x01, 0x0C, 0x01, 0x01, 0x02, 0x0A, 0x02];
+    let facts = ncasm_facts(&[0x6B], &[reading, capability]);
+
+    assert!(encode::encode(&facts, &Verb::AmbientLevel(12)).is_ok());
+    let refused = encode::encode(&facts, &Verb::AmbientLevel(15)).expect_err("15 is past the headset's 12");
+    assert!(matches!(&refused, Refusal::OutOfDeviceRange { min: 1, max: 12, step: 1, .. }), "{refused:?}");
+    assert_eq!(refused.clone().side(), Side::Device);
+    assert!(refused.message().contains("1 to 12"), "{}", refused.message());
+
+    // With focus on voice the VOICE range applies, step and all.
+    let voiced = ncasm_facts(&[0x6B], &[&[0x67, 0x17, 0x01, 0x01, 0x01, 0x01, 0x04], capability]);
+    assert!(encode::encode(&voiced, &Verb::AmbientLevel(6)).is_ok());
+    let odd = encode::encode(&voiced, &Verb::AmbientLevel(5)).expect_err("5 is off the step of two");
+    assert!(odd.message().contains("in steps of 2"), "{}", odd.message());
+
+    // A range stated at another type is not evidence about this one, and
+    // with no range the compatibility bound applies.
+    let other = ncasm_facts(&[0x6B], &[reading, &[0x61, 0x19, 0x01, 0x00, 0x01, 0x05, 0x01]]);
+    assert!(encode::encode(&other, &Verb::AmbientLevel(20)).is_ok(), "a 0x19 range bound a 0x17 write");
+    let none = ncasm_facts(&[0x6B], &[reading]);
+    assert!(encode::encode(&none, &Verb::AmbientLevel(20)).is_ok());
+    assert!(matches!(
+        encode::encode(&none, &Verb::AmbientLevel(21)),
+        Err(Refusal::OutOfDeviceRange { min: 1, max: 20, .. })
+    ));
 }
