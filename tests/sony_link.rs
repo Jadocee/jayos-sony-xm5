@@ -582,3 +582,135 @@ fn an_unrelated_io_error_is_left_alone() {
     let err = link::LinkError::Io(std::io::Error::from_raw_os_error(19));
     assert!(!err.to_string().contains("one control session"));
 }
+
+// ── plan 23, item 7: the layouts against the C declarations ─────────────────
+//
+// `the_socket_addresses_are_laid_out_the_way_the_kernel_reads_them` asserts
+// the bytes against numbers written in the test. These two hold the same
+// bytes against the C STRUCTS, transcribed, so that a wrong offset in either
+// place is caught by the other -- and so the offsets are the compiler's
+// arithmetic rather than a person's. Transcribed from BlueZ's
+// lib/bluetooth/rfcomm.h and lib/bluetooth/l2cap.h (bdaddr_t is a packed
+// struct of six bytes, lib/bluetooth/bluetooth.h). Read, not run against the
+// headers: no BlueZ development files here.
+
+/// `bdaddr_t`: `struct { uint8_t b[6]; } __attribute__((packed))`.
+#[repr(C, packed)]
+#[allow(dead_code)]
+struct BdAddr([u8; 6]);
+
+/// `struct sockaddr_rc`.
+#[repr(C)]
+#[allow(dead_code)]
+struct SockaddrRc {
+    rc_family: u16,
+    rc_bdaddr: BdAddr,
+    rc_channel: u8,
+}
+
+/// `struct sockaddr_l2`.
+#[repr(C)]
+#[allow(dead_code)]
+struct SockaddrL2 {
+    l2_family: u16,
+    l2_psm: u16,
+    l2_bdaddr: BdAddr,
+    l2_cid: u16,
+    l2_bdaddr_type: u8,
+}
+
+#[test]
+fn the_byte_layouts_are_the_c_structs_layouts() {
+    use std::mem::{align_of, offset_of, size_of};
+    let mac = Mac::parse("AA:BB:CC:DD:EE:FF").expect("it parses");
+
+    assert_eq!(size_of::<SockaddrRc>(), 10, "sockaddr_rc pads to 10");
+    assert_eq!(align_of::<SockaddrRc>(), 2);
+    let rc = link::rfcomm_sockaddr(mac, 9);
+    assert_eq!(rc.len(), size_of::<SockaddrRc>());
+    assert_eq!(offset_of!(SockaddrRc, rc_family), 0);
+    assert_eq!(offset_of!(SockaddrRc, rc_bdaddr), 2);
+    assert_eq!(offset_of!(SockaddrRc, rc_channel), 8);
+    let at = offset_of!(SockaddrRc, rc_bdaddr);
+    assert_eq!(&rc[at..at + 6], &[0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA]);
+    assert_eq!(rc[offset_of!(SockaddrRc, rc_channel)], 9);
+
+    assert_eq!(size_of::<SockaddrL2>(), 14, "sockaddr_l2 pads to 14");
+    assert_eq!(align_of::<SockaddrL2>(), 2);
+    let l2 = link::l2cap_sockaddr(mac, 0x0001);
+    assert_eq!(l2.len(), size_of::<SockaddrL2>());
+    assert_eq!(offset_of!(SockaddrL2, l2_psm), 2);
+    assert_eq!(offset_of!(SockaddrL2, l2_bdaddr), 4);
+    assert_eq!(offset_of!(SockaddrL2, l2_cid), 10);
+    assert_eq!(offset_of!(SockaddrL2, l2_bdaddr_type), 12);
+    let at = offset_of!(SockaddrL2, l2_psm);
+    assert_eq!(u16::from_le_bytes([l2[at], l2[at + 1]]), 1);
+    let at = offset_of!(SockaddrL2, l2_bdaddr);
+    assert_eq!(&l2[at..at + 6], &[0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA]);
+}
+
+/// BlueZ's `str2ba` (lib/bluetooth.c), transcribed: six hex fields, the
+/// first written into `b[5]`. Its own validation is `bachk`, which this
+/// folds in: exactly 17 characters, colons at every third.
+fn str2ba(text: &str) -> Option<[u8; 6]> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 17 || (0..5).any(|i| bytes[i * 3 + 2] != b':') {
+        return None;
+    }
+    let mut b = [0u8; 6];
+    for i in 0..6 {
+        b[5 - i] = u8::from_str_radix(text.get(i * 3..i * 3 + 2)?, 16).ok()?;
+    }
+    Some(b)
+}
+
+/// BlueZ's `ba2str`: `"%2.2X:..."` from `b[5]` down to `b[0]`.
+fn ba2str(b: [u8; 6]) -> String {
+    format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}", b[5], b[4], b[3], b[2], b[1], b[0])
+}
+
+#[test]
+fn an_address_goes_to_the_kernel_the_way_bluez_puts_it_there() {
+    // The address reversal against BlueZ's own two functions, both ways and
+    // over addresses that are not palindromes or near it, including the
+    // all-zero BDADDR_ANY and the all-ones BDADDR_ALL.
+    for text in ["AA:BB:CC:DD:EE:FF", "01:02:03:04:05:06", "00:00:00:00:00:00", "FF:FF:FF:FF:FF:FF", "E8:9C:25:5D:B8:19"] {
+        let mac = Mac::parse(text).expect("it parses");
+        let ours: [u8; 6] = link::rfcomm_sockaddr(mac, 1)[2..8].try_into().expect("six bytes");
+        assert_eq!(Some(ours), str2ba(text), "{text}: our bdaddr is not BlueZ's");
+        assert_eq!(ba2str(ours), mac.to_string(), "{text}: BlueZ would print it differently");
+        assert_eq!(ba2str(ours), text);
+    }
+    // Lowercase in, the kernel's bytes are the same.
+    assert_eq!(str2ba("aa:bb:cc:dd:ee:ff"), str2ba("AA:BB:CC:DD:EE:FF"));
+}
+
+#[test]
+#[ignore = "needs AF_BLUETOOTH: run on the capture machine, docs/CAPTURE.md"]
+fn the_kernel_reads_back_the_address_it_was_given() {
+    // The one check that needs the kernel: bind an RFCOMM socket to
+    // BDADDR_ANY and a channel, and read the address back with getsockname.
+    // The family and the channel must come back where this port put them.
+    // Binding needs no headset and no connection -- only a Bluetooth stack.
+    #[repr(C, align(2))]
+    struct Raw([u8; 10]);
+    let fd = unsafe { libc::socket(libc::AF_BLUETOOTH, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 3) };
+    assert!(
+        fd >= 0,
+        "socket(AF_BLUETOOTH, BTPROTO_RFCOMM) failed: {} -- this machine has no Bluetooth stack",
+        std::io::Error::last_os_error()
+    );
+    let addr = Raw(link::rfcomm_sockaddr(Mac([0; 6]), 30));
+    let bound = unsafe { libc::bind(fd, addr.0.as_ptr().cast(), 10) };
+    let bind_error = std::io::Error::last_os_error();
+    let mut back = Raw([0; 10]);
+    let mut len: libc::socklen_t = 10;
+    let named = unsafe { libc::getsockname(fd, back.0.as_mut_ptr().cast(), &mut len) };
+    let name_error = std::io::Error::last_os_error();
+    unsafe { libc::close(fd) };
+    assert_eq!(bound, 0, "bind: {bind_error}");
+    assert_eq!(named, 0, "getsockname: {name_error}");
+    assert_eq!(len, 10);
+    assert_eq!(u16::from_ne_bytes([back.0[0], back.0[1]]), libc::AF_BLUETOOTH as u16);
+    assert_eq!(back.0[8], 30, "the channel came back somewhere else");
+}
