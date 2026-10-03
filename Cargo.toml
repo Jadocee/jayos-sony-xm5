@@ -1,0 +1,58 @@
+# Sony's MDR protocol, the daemon that speaks it, and the client the shell
+# calls.
+#
+# WHY ONE PACKAGE AND NOT A LIBRARY CRATE PLUS TWO BINARY CRATES
+#
+# `mdr` and `sony` import each other: the encoder turns the command language
+# (`sony::command`) into frames, and the session (`sony::session`) feeds frames
+# to the decoder. Splitting them across crates would need one of the two to
+# grow a trait whose only purpose is to break the cycle. And the daemon test
+# (`tests/sony_daemon.rs`) runs both binaries through `CARGO_BIN_EXE_*`, which
+# cargo only provides for binaries in the same package as the test.
+#
+# WHY THE FIELDS ARE LITERALS
+#
+# This code came out of jayos's `rust/` workspace (`crates/qs-hw`), where
+# version, edition, MSRV and licence were inherited. A standalone package has
+# nothing to inherit from, and the values are kept identical so the move is a
+# move and not a change: `DAEMON_VERSION` is built from `CARGO_PKG_VERSION`, and
+# the published document says `qs-1.0.0` before and after.
+[package]
+name = "jayos-sony-xm5"
+description = "Sony WH-1000XM5 headphones over Bluetooth: the MDR protocol, qs-sonyd and qs-sony"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/Jadocee/jayos-sony-xm5"
+publish = false
+
+[lib]
+name = "sony_xm5"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+# serde and serde_json are the client's alone: the library writes its JSON by
+# hand (`sony::state::serialize`), in the reference daemon's key order, which a
+# derived serializer would not reproduce. `support::emit` and `qs-sony` are the
+# two users.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# jayos's release profile, verbatim, for the reasons its workspace manifest
+# gives. The one that matters most here is `panic = "abort"`: nothing in the
+# daemon catches a panic, and `sony::atomic_write` retries a stale temporary
+# file precisely because an aborted process cannot clean one up.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
