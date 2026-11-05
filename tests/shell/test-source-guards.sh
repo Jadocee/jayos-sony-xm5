@@ -91,9 +91,10 @@ fi
 # WHY THIS IS A GREP AND NOT A TEST.
 #
 # `read_until_gone` and the engine's mailbox live in `bin/qs-sonyd.rs`, which
-# is a binary: no integration test can call either, and `sony_daemon.rs` can
-# only start the process on a machine with no Bluetooth adapter, where no link
-# is ever established and so none ever ends. The behaviour is a two-line
+# is a binary: no integration test can call either, and `sony_daemon.rs` only
+# starts the process with a bluetoothctl of its own that lists nothing
+# connected -- deliberately, since 2026-11-06, its header says why -- so no
+# link is ever established and none ever ends. The behaviour is a two-line
 # mapping and the mapping is what goes stale, so the mapping is what is pinned.
 #
 # What it is about: `read` returning 0 is an orderly close -- the headphones

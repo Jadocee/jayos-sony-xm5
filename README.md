@@ -52,6 +52,13 @@ check over every tracked script. Exit 0 is clean, 1 is a failure, 2 is "could
 not run" (no cargo, no jq) -- which is not the same answer as clean and is not
 reported as one.
 
+No test reaches the machine's Bluetooth, so the package's `check()` is safe on
+a machine with a headset connected: the daemons the tests start are given a
+`PATH` holding only a `bluetoothctl` of the suite's own, which lists nothing
+connected, and a test fails if one asks anything else. Until 2026-11-06 they
+inherited the build's `PATH` and dialled whatever was connected;
+`tests/sony_daemon.rs`'s header has what that cost.
+
 ## Licence
 
 MIT; see `LICENSE`. The captured frames and the protocol reference are
