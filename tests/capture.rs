@@ -1036,11 +1036,16 @@ fn a_recording_directory_that_cannot_be_made_stops_the_daemon_at_start() {
     let base = std::env::temp_dir().join(format!("sony-capture-daemon-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(base.join("run")).expect("a runtime directory");
+    // And an empty PATH, so that a daemon which got as far as dialling would
+    // find no bluetoothctl rather than the machine's: tests/sony_daemon.rs's
+    // header says what the machine's cost on 2026-11-06.
+    std::fs::create_dir_all(base.join("path")).expect("an empty PATH directory");
     let mut child = std::process::Command::new(DAEMON)
         .args(["once", "--record=/dev/null/capture"])
         .env("XDG_STATE_HOME", base.join("state"))
         .env("XDG_RUNTIME_DIR", base.join("run"))
         .env("HOME", &base)
+        .env("PATH", base.join("path"))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

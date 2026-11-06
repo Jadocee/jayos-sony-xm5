@@ -599,7 +599,7 @@ fn find_headset() -> Result<(link::Device, Vec<link::Mdr>), link::LinkError> {
         &["devices", "Connected"],
         INVENTORY_TIMEOUT,
     )
-    .map_err(link::LinkError::Io)?;
+    .map_err(|e| link::LinkError::Io(named(e)))?;
     for device in link::connected_devices(&listing.stdout) {
         let mac = device.mac.to_string();
         let Ok(info) =
@@ -613,6 +613,22 @@ fn find_headset() -> Result<(link::Device, Vec<link::Mdr>), link::LinkError> {
         }
     }
     Err(link::LinkError::NoDevice)
+}
+
+/// A `bluetoothctl` that is not there, said by name.
+///
+/// `spawn` reports it as ENOENT, and ENOENT's own words are "No such file or
+/// directory (os error 2)": they name no file, and they were the whole of
+/// `last_error` -- the line the Headphones page shows -- on a machine with no
+/// bluez-utils. Not connected and not installed send a person to two
+/// different places, so the second says which program it means. Every other
+/// error, a timeout among them, keeps its own words.
+fn named(e: std::io::Error) -> std::io::Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        std::io::Error::new(e.kind(), "bluetoothctl is not installed (it is in bluez-utils)")
+    } else {
+        e
+    }
 }
 
 #[cfg(test)]
