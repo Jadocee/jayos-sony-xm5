@@ -7,13 +7,36 @@
 //! temporary directory, and hold it to what `qs-sony` and the Headphones page
 //! actually depend on.
 //!
-//! THERE IS NO BLUETOOTH ADAPTER HERE, and that is not a limitation of these
-//! tests -- it is the case most machines are in most of the time, and the one
-//! this daemon has to get right. A daemon that only behaves when a headset is
-//! present is a daemon that spends its life misbehaving. So what is asserted
-//! is the no-headset path: that the document exists and says so, that the
-//! reason reaches it, that the socket still answers, that a second daemon
-//! refuses, and that a one-shot run ends.
+//! THERE IS NO HEADSET HERE, BY CONSTRUCTION, and that is not a limitation of
+//! these tests -- it is the case most machines are in most of the time, and
+//! the one this daemon has to get right. A daemon that only behaves when a
+//! headset is present is a daemon that spends its life misbehaving. So what is
+//! asserted is the no-headset path: that the document exists and says so,
+//! that the reason reaches it, that the socket still answers, that a second
+//! daemon refuses, and that a one-shot run ends.
+//!
+//! BY CONSTRUCTION, NOT BY LUCK. This file used to say "there is no Bluetooth
+//! adapter here", and it was true of every machine the suite had run on until
+//! the owner's: on 2026-11-06 jayos's recipe ran `cargo test` in makepkg's
+//! check() on a machine with a WH-1000XM5 connected. The daemons were started
+//! with the build's own `PATH`, asked the machine's `bluetoothctl`, found the
+//! headset, and dialled it -- seven daemons at once, each taking its turn at
+//! the headset's one control session, and every one that got it sending real
+//! MDR frames, `--alerts`'s enable among them. The one-shot run published
+//! `connected: true`, `a_one_shot_run_ends_by_itself` failed, and the package
+//! was never built. A build has no business with somebody's headphones, and a
+//! suite whose answers depend on what is paired to the machine running it is
+//! not testing the path it says it tests.
+//!
+//! So every daemon here is given a `PATH` of one directory, holding one
+//! program: [`BLUETOOTHCTL`], an adapter with nothing connected. `bluetoothctl`
+//! is the only program the daemon runs (`find_headset` in
+//! `src/bin/qs-sonyd.rs`), and its Bluetooth sockets are only opened to a
+//! device that listing names -- so with nothing listed, nothing is dialled.
+//! The script writes down what it was asked, and
+//! `the_daemon_asks_this_suites_bluetoothctl_and_never_the_machines` holds
+//! every daemon here to having asked it: a `PATH` override dropped, on a
+//! machine with no `bluetoothctl` or one with a headset, fails there by name.
 
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -25,6 +48,31 @@ use std::time::{Duration, Instant};
 const DAEMON: &str = env!("CARGO_BIN_EXE_qs-sonyd");
 const READER: &str = env!("CARGO_BIN_EXE_qs-sony");
 
+/// The `bluetoothctl` every daemon here finds: an adapter that is up with
+/// nothing connected, which writes each question it is asked, one line of
+/// arguments each, to the file `$LOG` stands for (`Home::new` writes the path
+/// in).
+///
+/// The two answers are BlueZ's own for that machine, as bluetoothctl's
+/// `client/main.c` gives them (BlueZ's master, read on 2026-11-05, not run):
+/// `cmd_devices` prints a line per device whose `Connected` is true and quits
+/// with EXIT_SUCCESS, so none prints nothing and exits 0; and `cmd_info` on an
+/// address the adapter does not know prints `Device <mac> not available`, then
+/// `cmd_set_info` prints `DeviceSet <mac> not available` and quits with
+/// EXIT_FAILURE. The second is never reached while the first lists nothing,
+/// and the guard below holds that too.
+const BLUETOOTHCTL: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$LOG"
+case "$1" in
+    devices) exit 0 ;;
+    info) printf 'Device %s not available\nDeviceSet %s not available\n' "$2" "$2"; exit 1 ;;
+esac
+exit 1
+"#;
+
+/// `LinkError::NoDevice`'s words: what a machine with nothing connected says.
+const NOTHING_CONNECTED: &str = "no connected headset speaks this protocol";
+
 struct Home {
     base: PathBuf,
 }
@@ -35,6 +83,18 @@ impl Home {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("state")).expect("a state directory");
         std::fs::create_dir_all(base.join("run")).expect("a runtime directory");
+        // The daemon's whole PATH, and nothing in it but the stand-in. Single
+        // quotes around the log's path in the script, so a path with a quote
+        // in it is refused here rather than written into a shell command.
+        let path = base.join("path");
+        std::fs::create_dir_all(&path).expect("a PATH directory");
+        let log = base.join("bluetoothctl.log");
+        let log = log.to_str().expect("a temporary path that is text");
+        assert!(!log.contains('\''), "the log's path is quoted in the script: {log}");
+        let script = BLUETOOTHCTL.replace("\"$LOG\"", &format!("'{log}'"));
+        let stub = path.join("bluetoothctl");
+        std::fs::write(&stub, script).expect("a stand-in bluetoothctl");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("executable");
         Home { base }
     }
 
@@ -46,9 +106,17 @@ impl Home {
             .env("XDG_RUNTIME_DIR", self.base.join("run"))
             // So the daemon's own fallbacks are never what is under test.
             .env("HOME", &self.base)
+            // And so the machine's Bluetooth never is: see the header.
+            .env("PATH", self.base.join("path"))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         command
+    }
+
+    /// What this home's `bluetoothctl` was asked, a line per call; empty if
+    /// it was never run.
+    fn asked(&self) -> String {
+        std::fs::read_to_string(self.base.join("bluetoothctl.log")).unwrap_or_default()
     }
 
     /// `qs-sony <verb>` against this home, with a `qs-devices` in jayos's
@@ -60,6 +128,11 @@ impl Home {
     /// `~/.local/bin` is not on `PATH` and a bare-name spawn found nothing.
     /// The daemon is found beside `qs-sony` in cargo's target directory, which
     /// is where the package installs them too -- no variable points at it.
+    ///
+    /// Left as it is but for one directory put ahead of it: the daemon's, with
+    /// its `bluetoothctl` and nothing else. `qs-sony` runs no `bluetoothctl`
+    /// today, and if it ever does, it is this suite's that answers rather than
+    /// the machine's. `qs-devices` is still on no `PATH` it is given.
     fn reader(&self, verb: &str) -> std::process::Output {
         let bin = self.base.join("bin");
         std::fs::create_dir_all(&bin).expect("a bin directory");
@@ -70,11 +143,14 @@ impl Home {
         )
         .expect("a fake inventory");
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("executable");
+        let mut path = vec![self.base.join("path")];
+        path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
         Command::new(READER)
             .arg(verb)
             .env("XDG_STATE_HOME", self.base.join("state"))
             .env("XDG_RUNTIME_DIR", self.base.join("run"))
             .env("HOME", &self.base)
+            .env("PATH", std::env::join_paths(path).expect("a PATH"))
             .env("QS_BIN_DIR", &bin)
             .env_remove("QS_BIN")
             .output()
@@ -180,6 +256,50 @@ fn the_reason_a_headset_could_not_be_reached_reaches_the_document() {
     assert_eq!(value["phase"], "idle", "no headset is not a broken daemon");
     let reason = value["last_error"].as_str().expect("a string");
     assert!(!reason.is_empty(), "the dial failed silently");
+    // And it is the reason for THIS machine, which has an adapter with nothing
+    // on it. It could only be said as "not empty" while the suite ran against
+    // whatever machine it was on: "No such file or directory" where there was
+    // no bluetoothctl, and nothing at all where a headset answered.
+    assert_eq!(reason, NOTHING_CONNECTED);
+}
+
+#[test]
+fn the_daemon_asks_this_suites_bluetoothctl_and_never_the_machines() {
+    // THE GUARD ON EVERY OTHER TEST HERE (the header has why). A `PATH`
+    // override dropped from `Home::command`, or a daemon that found
+    // `bluetoothctl` some other way, still passes the tests above on a machine
+    // with nothing paired -- and dials the headset of the next one that has a
+    // headset connected. This is what fails instead, wherever it runs.
+    let home = Home::new("hermetic");
+    let out = home.command("once").output().expect("it runs");
+    assert!(out.status.success(), "{out:?}");
+    let asked = home.asked();
+    assert_eq!(
+        asked, "devices Connected\n",
+        "the daemon was to ask this suite's bluetoothctl what is connected, once, and nothing about \
+         any one device, since nothing is: it asked {asked:?}"
+    );
+    assert_eq!(document(&home.state_file())["last_error"], NOTHING_CONNECTED);
+}
+
+#[test]
+fn a_machine_with_no_bluetoothctl_is_told_so_by_name() {
+    // The other way of having no headset, and the one the reason has to tell
+    // apart from it: "not connected" sends a person to the headset, and
+    // "bluetoothctl is not installed" to pacman. It reached the document as
+    // spawn's ENOENT, "No such file or directory (os error 2)", which names no
+    // file.
+    let home = Home::new("nobluetoothctl");
+    let empty = home.base.join("empty");
+    std::fs::create_dir_all(&empty).expect("an empty PATH directory");
+    let out = home.command("once").env("PATH", &empty).output().expect("it runs");
+    assert!(out.status.success(), "a machine with no bluetoothctl is not a failed run: {out:?}");
+    let value = document(&home.state_file());
+    assert_eq!(value["connected"], false);
+    assert_eq!(value["phase"], "idle", "no bluetoothctl is not a broken daemon");
+    let reason = value["last_error"].as_str().expect("a string");
+    assert!(reason.contains("bluetoothctl is not installed"), "the reason does not say what is missing: {reason}");
+    assert!(home.asked().is_empty(), "the stand-in was not on this PATH, and was asked anyway");
 }
 
 #[test]
