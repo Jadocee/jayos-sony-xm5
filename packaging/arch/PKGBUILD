@@ -13,8 +13,9 @@
 # this repository from GitHub (jayos: pkgbuilds/jayos-sony-xm5/PKGBUILD); its
 # check() reads _helpers here and refuses to build if the two lists differ.
 #
-# pkgver is the crate's version, written out. tests/shell/test-packaging.sh
-# holds the two to each other. A pkgver() function would make makepkg rewrite
+# pkgver is the crate's version, written out, and VERSION's, which a release
+# tag repeats (docs/RELEASES.md). tests/shell/test-packaging.sh holds pkgver to
+# the crate, and tests/shell/test-release.sh all three to each other. A pkgver() function would make makepkg rewrite
 # this file on every build, and a recipe that edits itself in a checkout is a
 # recipe whose diff nobody can read.
 

@@ -135,6 +135,37 @@ const ONCE_SETTLE: Duration = Duration::from_millis(1_500);
 const REDIAL_FIRST: Duration = Duration::from_secs(2);
 const REDIAL_LONGEST: Duration = Duration::from_secs(60);
 
+/// The gap a redial grows to when the last attempt went OVER THE AIR: a
+/// headset was connected and its dial failed, or its link ended soon after
+/// it was made.
+///
+/// Not the same cost as `REDIAL_LONGEST`'s case. Finding no headset is two
+/// `bluetoothctl` reads of bluetoothd's own cache, and nothing reaches the
+/// radio. A dial is an L2CAP connection to the headset's SDP server and,
+/// when that answers, an RFCOMM connection -- each set up and torn down on
+/// the ACL link that is carrying the music. A2DP has no slack on that link
+/// on a 2.4 GHz desk, and a headset that is streaming is exactly the one a
+/// dial reaches. So a headset this daemon cannot hold a link to is asked
+/// once every five minutes at most, rather than once a minute for ever.
+/// READ EVIDENCE: the owner reported a WH-1000XM5's audio laggy and cutting
+/// out on 2026-11-12, and nothing in this repository has measured what a
+/// dial costs a stream; the backoff is the cheap side of that bet.
+const REDIAL_ON_AIR_LONGEST: Duration = Duration::from_secs(300);
+
+/// How long a link must last before its end counts as the end of a session
+/// rather than a dial that did not take.
+///
+/// THE BACKOFF USED TO RESET ON EVERY LINK THAT OPENED, however soon it
+/// closed. A headset that accepts the RFCOMM connection and hangs up at once
+/// -- one whose MDR channel another device holds, say, multipoint with a
+/// phone running Sony's app -- went round `dial_forever` at REDIAL_FIRST
+/// every time: an SDP query and an RFCOMM connect every two seconds or so,
+/// for as long as it stayed connected, on the link playing its audio. Half a
+/// minute is longer than the handshake ever takes (`ONCE_LONGEST` bounds a
+/// whole one-shot run at thirty seconds) and far shorter than anybody wears
+/// a headset for.
+const LINK_STEADY: Duration = Duration::from_secs(30);
+
 /// What the engine thread is told about.
 enum Msg {
     LinkUp { peer: Peer, writer: link::Channel },
@@ -476,9 +507,10 @@ fn log(note: &Note) {
 fn dial_forever(post: Sender<Msg>, once: bool) {
     let mut wait = REDIAL_FIRST;
     loop {
+        let outcome;
         match dial() {
             Ok((device, generation, channel)) => {
-                wait = REDIAL_FIRST;
+                let began = Instant::now();
                 let reader = match channel.try_clone() {
                     Ok(reader) => reader,
                     Err(e) => {
@@ -494,11 +526,13 @@ fn dial_forever(post: Sender<Msg>, once: bool) {
                     return;
                 }
                 let why = read_until_gone(&reader, &post);
+                outcome = Attempt::Linked(began.elapsed());
                 if post.send(Msg::LinkDown(why)).is_err() {
                     return;
                 }
             }
             Err(e) => {
+                outcome = attempt_of(&e);
                 if post.send(Msg::Trouble(e.to_string())).is_err() {
                     return;
                 }
@@ -507,9 +541,55 @@ fn dial_forever(post: Sender<Msg>, once: bool) {
         if once {
             return;
         }
-        std::thread::sleep(wait);
-        wait = (wait * 2).min(REDIAL_LONGEST);
+        let (pause, next) = redial(wait, outcome);
+        std::thread::sleep(pause);
+        wait = next;
     }
+}
+
+/// What one turn of `dial_forever` came to, as far as the backoff cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Attempt {
+    /// No connected device advertises an MDR service: nothing was sent over
+    /// the air.
+    NoHeadset,
+    /// A headset was found and its SDP query or RFCOMM connect failed.
+    DialFailed,
+    /// A link was made, and ended after this long.
+    Linked(Duration),
+}
+
+/// Which backoff a failed turn takes. Only `NoDevice` is known not to have
+/// reached the radio; `Io` is a `bluetoothctl` that would not answer as well
+/// as a socket that would not connect, and is counted as the costlier of the
+/// two, so a machine that has just gained bluez-utils waits up to five
+/// minutes for its first dial rather than one -- the cheap side of not
+/// knowing.
+fn attempt_of(e: &link::LinkError) -> Attempt {
+    match e {
+        link::LinkError::NoDevice => Attempt::NoHeadset,
+        _ => Attempt::DialFailed,
+    }
+}
+
+/// The pause before the next dial, and the wait the turn after it starts
+/// from: `wait` is what this turn would pause for, doubled each turn up to a
+/// ceiling that depends on whether the turn reached the radio.
+///
+/// A link that lasted `LINK_STEADY` was a session, and its end -- a headset
+/// switched off -- starts the count again at `REDIAL_FIRST`, so switching it
+/// back on is answered at once. A shorter one is a dial that did not take,
+/// and backs off with the failures, to `REDIAL_ON_AIR_LONGEST`. Finding no
+/// headset backs off to `REDIAL_LONGEST`, and coming down from the longer
+/// ceiling to it is what makes a headset that went away and came back quick
+/// to find again.
+fn redial(wait: Duration, outcome: Attempt) -> (Duration, Duration) {
+    let (pause, ceiling) = match outcome {
+        Attempt::Linked(lasted) if lasted >= LINK_STEADY => (REDIAL_FIRST, REDIAL_ON_AIR_LONGEST),
+        Attempt::Linked(_) | Attempt::DialFailed => (wait, REDIAL_ON_AIR_LONGEST),
+        Attempt::NoHeadset => (wait.min(REDIAL_LONGEST), REDIAL_LONGEST),
+    };
+    (pause, (pause * 2).min(ceiling))
 }
 
 /// Read from the headset until it stops, forwarding every byte to the engine.
@@ -646,5 +726,59 @@ mod tests {
         let engine = Duration::from_millis(Limits::default().ack_wait);
         assert!(engine < DISPATCH_WAIT, "the engine's answer would arrive after the socket gave up");
         assert!(DISPATCH_WAIT < Duration::from_secs(3), "the socket's answer would arrive after qs-sony gave up");
+    }
+
+    /// The pauses a run of the same outcome produces, from a fresh start.
+    fn pauses(outcome: Attempt, turns: usize) -> Vec<u64> {
+        let mut wait = REDIAL_FIRST;
+        (0..turns)
+            .map(|_| {
+                let (pause, next) = redial(wait, outcome);
+                wait = next;
+                pause.as_secs()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_link_the_headset_drops_at_once_backs_off_like_a_failure() {
+        // The storm this replaced: every turn paused REDIAL_FIRST, so a
+        // headset that hung up straight away was dialled every two seconds
+        // for as long as it was connected.
+        let dropped = pauses(Attempt::Linked(Duration::from_millis(300)), 10);
+        assert_eq!(dropped, vec![2, 4, 8, 16, 32, 64, 128, 256, 300, 300]);
+        assert_eq!(dropped, pauses(Attempt::DialFailed, 10));
+    }
+
+    #[test]
+    fn a_session_that_ended_is_redialled_at_once() {
+        // A headset switched off after an hour, then on again: the first
+        // dial after the session is REDIAL_FIRST, however long the backoff
+        // had grown before it.
+        let (pause, next) = redial(REDIAL_ON_AIR_LONGEST, Attempt::Linked(LINK_STEADY));
+        assert_eq!((pause, next), (REDIAL_FIRST, REDIAL_FIRST * 2));
+    }
+
+    #[test]
+    fn no_headset_costs_no_radio_and_keeps_the_minute_ceiling() {
+        assert_eq!(pauses(Attempt::NoHeadset, 8), vec![2, 4, 8, 16, 32, 60, 60, 60]);
+        // And a headset that went away after dials failed is looked for
+        // within the minute again, not five.
+        let (pause, next) = redial(REDIAL_ON_AIR_LONGEST, Attempt::NoHeadset);
+        assert_eq!((pause, next), (REDIAL_LONGEST, REDIAL_LONGEST));
+    }
+
+    #[test]
+    fn only_finding_no_headset_keeps_the_cheap_ceiling() {
+        assert_eq!(attempt_of(&link::LinkError::NoDevice), Attempt::NoHeadset);
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert_eq!(attempt_of(&link::LinkError::Io(refused)), Attempt::DialFailed);
+    }
+
+    #[test]
+    fn the_ceilings_are_in_the_order_their_costs_are() {
+        assert!(REDIAL_FIRST < REDIAL_LONGEST);
+        assert!(REDIAL_LONGEST < REDIAL_ON_AIR_LONGEST);
+        assert!(LINK_STEADY >= ONCE_LONGEST, "a handshake that finished inside a one-shot run's bound must not count as a session");
     }
 }

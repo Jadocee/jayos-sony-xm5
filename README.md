@@ -25,8 +25,9 @@ which kind of evidence stands behind it.
 | `scripts/sony-daemon-process.sh` | Starts and stops the daemon, keeps its stderr, removes its document on stop. Knows nothing about whether it *should* run; that is the shell's setting. |
 | `contract/` | What JayOS tests its side against: a real state document, every key it carries, the command language, the model prefixes. Generated; see `contract/README.md`. |
 | `packaging/arch/PKGBUILD` | Builds and installs this checkout. |
-| `docs/` | `PROTOCOL.md`, the map; `EVIDENCE.md`, what each claim stands on; `OUTSTANDING.md`, what a WH-1000XM5 capture would still settle; `CAPTURE.md`, how to make one. |
+| `docs/` | `PROTOCOL.md`, the map; `EVIDENCE.md`, what each claim stands on; `OUTSTANDING.md`, what a WH-1000XM5 capture would still settle; `CAPTURE.md`, how to make one; `RELEASES.md`, how a release is made. |
 | `tools/acceptance.sh` | That capture session, scripted. `--dry-run` says every step and runs none. |
+| `tools/release.sh`, `tools/publish-release.sh` | A release: the owner's signed tag, and what `.github/workflows/release.yml` checks and publishes. |
 
 ## Installing
 
@@ -58,6 +59,14 @@ a machine with a headset connected: the daemons the tests start are given a
 connected, and a test fails if one asks anything else. Until 2026-11-06 they
 inherited the build's `PATH` and dialled whatever was connected;
 `tests/sony_daemon.rs`'s header has what that cost.
+
+## Releases
+
+A release is a signed tag, `vMAJOR.MINOR.PATCH`, on `main`, made by the
+owner with `tools/release.sh`; JayOS builds the release its recipe pins, not
+`main`. `docs/RELEASES.md` has how one is made, what is refused, and the
+owner's steps before the first. None exists yet: `.github/allowed_signers`
+holds no key until the owner adds one.
 
 ## Licence
 
