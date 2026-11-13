@@ -7,7 +7,7 @@
 //! `$XDG_RUNTIME_DIR/sony-headphones/daemon.sock` are the C++ daemon's paths,
 //! kept deliberately rather than moved under jayos's `qs_core::paths`. Three things
 //! depend on it: jayos's `doctor.d/50-hardware.sh` keys off that exact state path,
-//! `qs-sony` carries a schema-version guard whose whole purpose is that the two
+//! `jayos-sony` carries a schema-version guard whose whole purpose is that the two
 //! implementations are interchangeable, and anyone who already installed the
 //! C++ daemon keeps working. Moving the paths would break interop for precisely
 //! the people who cared enough to install the thing this replaces.
@@ -50,7 +50,7 @@ pub const DAEMON_VERSION: &str = concat!("qs-", env!("CARGO_PKG_VERSION"));
 ///
 /// In the library, and public, because it is part of the contract: jayos's
 /// Devices page makes the same offer on a machine where this package is not
-/// installed yet -- so there is no `qs-sony` to ask -- and it does so from a
+/// installed yet -- so there is no `jayos-sony` to ask -- and it does so from a
 /// copy of this list. `contract/sony-prefixes.txt` is generated from it and a
 /// jayos suite holds the page's copy to that file.
 pub const SONY_PREFIXES: [&str; 7] = ["wh-", "wf-", "wi-", "linkbuds", "mdr-", "ult wear", "inzone"];
@@ -58,7 +58,7 @@ pub const SONY_PREFIXES: [&str; 7] = ["wh-", "wf-", "wi-", "linkbuds", "mdr-", "
 /// `$HOME`, or `/` when the environment has none -- which happens under a
 /// systemd unit with an empty environment, and is worth not panicking over.
 ///
-/// Public because `qs-sony` needs the same answer and is a separate crate: a
+/// Public because `jayos-sony` needs the same answer and is a separate crate: a
 /// `pub(crate)` here cannot reach a binary. It was `qs_core::paths::home` in
 /// jayos, which is not a dependency of this repository; the two bodies were
 /// already identical, so one of them went.

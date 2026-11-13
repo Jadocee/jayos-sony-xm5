@@ -9,7 +9,7 @@
 //! serde_json's map is a `BTreeMap`, so routing this through `Value` would sort
 //! every key alphabetically -- `ambient_level` before `mode`, `case` before
 //! `main` -- and the document would no longer match the C++ daemon's byte for
-//! byte. That matters for one specific reason: `qs-sony` carries a schema
+//! byte. That matters for one specific reason: `jayos-sony` carries a schema
 //! version guard so that this implementation and an already-installed C++ one
 //! are interchangeable. A reader that works against one and not the other
 //! defeats the guard.
@@ -20,7 +20,7 @@
 //!
 //! WHAT THIS IS NOT
 //!
-//! It is not the shape `qs-sony` was reading. That helper was written against a
+//! It is not the shape `jayos-sony` was reading. That helper was written against a
 //! different project and looked for `name` and `model` at the top level and a
 //! bare number at `battery.main`; the documented daemon has never written
 //! either. Fixing the reader is a separate commit -- the writer goes first,
@@ -541,7 +541,7 @@ pub struct State {
     /// The question the headset is waiting on, or `None`. Plan 23, item 14.
     ///
     /// Set whenever the headset sends ALERT_NTFY_PARAM at FIXED_MESSAGE,
-    /// which it does once `94 00 00` has enabled them -- what `qs-sonyd
+    /// which it does once `94 00 00` has enabled them -- what `jayos-sonyd
     /// --alerts` sends. The read is NOT gated on that flag: a headset asking
     /// is waiting for an answer however its alerts came to be on, and
     /// `replay::document`, which has no flag at all, publishes one

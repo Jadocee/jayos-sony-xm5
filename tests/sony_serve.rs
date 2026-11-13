@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn work(name: &str) -> PathBuf {
-    let base = std::env::temp_dir().join(format!("qs-sony-serve-{name}-{}", std::process::id()));
+    let base = std::env::temp_dir().join(format!("jayos-sony-serve-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).expect("a working directory");
     base
@@ -51,7 +51,7 @@ fn start<D: serve::Dispatch>(bound: Bound, dispatch: D, limits: Limits) -> (Path
     })
 }
 
-/// One command, one reply, as `qs-sony` does it.
+/// One command, one reply, as `jayos-sony` does it.
 fn ask(path: &std::path::Path, line: &str) -> std::io::Result<String> {
     let mut stream = UnixStream::connect(path)?;
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
@@ -220,7 +220,7 @@ fn an_over_long_command_is_refused_rather_than_buffered() {
 #[test]
 fn more_clients_than_the_cap_are_told_so_rather_than_dropped() {
     // A closed connection with no reply is indistinguishable from a crashed
-    // daemon, and `qs-sony` would report it as one. A busy daemon says it is
+    // daemon, and `jayos-sony` would report it as one. A busy daemon says it is
     // busy.
     let base = work("cap");
     let socket = base.join("daemon.sock");

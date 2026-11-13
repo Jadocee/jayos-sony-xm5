@@ -2537,7 +2537,7 @@ fn decode_noise_capability(message: &Message) -> Option<Reading> {
 /// when the reference CLIENT turned out to settle frames the corpus holds but
 /// cannot explain on its own, and when other projects' observations of a
 /// WH-1000XM5 turned out to settle frames the corpus does not hold at all. So
-/// it is a value, and `qs-sony decode` prints it beside every frame.
+/// it is a value, and `jayos-sony decode` prints it beside every frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Grounds {
     /// A real headset sent this key -- [`Key`]'s, with a volunteered NTFY

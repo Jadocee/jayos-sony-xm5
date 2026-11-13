@@ -1,4 +1,4 @@
-//! Argument parsing, output and subprocesses, for `qs-sony` and `qs-sonyd`.
+//! Argument parsing, output and subprocesses, for `jayos-sony` and `jayos-sonyd`.
 //!
 //! WHY A COPY AND NOT A DEPENDENCY
 //!

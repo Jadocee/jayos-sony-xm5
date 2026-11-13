@@ -432,7 +432,7 @@ fn an_unacknowledged_frame_is_resent_at_the_same_sequence_then_the_link_is_dropp
     assert!(retries > 0, "the retry rule is under test, so there must be retries");
 
     // The first deadline is what a client would see, and it stays under
-    // qs-sony's own 3s per-operation timeout.
+    // jayos-sony's own 3s per-operation timeout.
     let mut t = session.deadline().expect("the first handshake frame is in flight");
     assert!(t < 3_000, "the daemon must answer before its client gives up");
 
@@ -485,7 +485,7 @@ fn an_unacknowledged_frame_is_resent_at_the_same_sequence_then_the_link_is_dropp
 /// jayos's `readSony` (`ts/src/settings/Integration.ts`) turns `phase:
 /// "error"` into a red chip with `last_error` as its sentence, and a headset that is
 /// simply not there into a green "no headset connected". Which of the two an
-/// ended link becomes is decided by the transport -- `qs-sonyd.rs`'s
+/// ended link becomes is decided by the transport -- `jayos-sonyd.rs`'s
 /// `read_until_gone` answers `Down::Closed` for an orderly end-of-file and
 /// `Down::Failed` for a read error. It used to answer a sentence, which the
 /// engine wrapped in `Down::Failed` unconditionally, so a headset switched off
@@ -599,7 +599,7 @@ fn acknowledge_all(session: &mut Session, effects: Vec<Effect>, now: &mut u64) {
 
 #[test]
 fn a_client_is_answered_at_the_first_deadline_and_the_frame_is_still_retried() {
-    // qs-sony gives up after 3s and the daemon's socket after 2s, so a client
+    // jayos-sony gives up after 3s and the daemon's socket after 2s, so a client
     // told at the third expiry would be told nothing. It hears the refusal at
     // the first, and the frame keeps being retried with nobody waiting on it.
     let mut session = fresh();
@@ -1087,7 +1087,7 @@ fn the_two_equaliser_writes_reach_the_wire_and_the_preset_write_still_does_not()
 
 #[test]
 fn nothing_outstanding_does_not_mean_the_headset_has_finished_answering() {
-    // THE PROPERTY `qs-sonyd once` USED TO MISTAKE FOR "done".
+    // THE PROPERTY `jayos-sonyd once` USED TO MISTAKE FOR "done".
     //
     // Its exit was `published_once && session.deadline().is_none()`, and
     // `deadline` reports only the frame in flight -- so it is `None` the
@@ -1135,7 +1135,7 @@ fn nothing_outstanding_does_not_mean_the_headset_has_finished_answering() {
     assert!(
         quiet_and_empty > 0,
         "no quiet moment carried an empty document -- if this is genuinely \
-         unreachable now, the settle in qs-sonyd.rs is dead code and should go, \
+         unreachable now, the settle in jayos-sonyd.rs is dead code and should go, \
          but do not delete this test to make it pass"
     );
 

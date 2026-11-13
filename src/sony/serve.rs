@@ -1,6 +1,6 @@
 //! The client socket: one command per connection, answered and closed.
 //!
-//! `qs-sony` is the only client that ships, and it does exactly one thing per
+//! `jayos-sony` is the only client that ships, and it does exactly one thing per
 //! connection -- connect, write a line, read a reply, exit. That is the whole
 //! protocol, and it is worth stating what it buys: there is no session, no
 //! subscription and no ordering between clients, so a client that dies mid
@@ -67,7 +67,7 @@ pub struct Limits {
     pub clients: usize,
     /// The longest command line accepted, in bytes.
     ///
-    /// `qs-sony` refuses to send more than this, so a line over it is either a
+    /// `jayos-sony` refuses to send more than this, so a line over it is either a
     /// different client or a probe. Bytes rather than characters, because that
     /// is what a socket read is measured in and what a limit has to bound.
     pub line: usize,
@@ -82,7 +82,7 @@ impl Default for Limits {
     fn default() -> Limits {
         Limits {
             clients: 16,
-            // The same 4096 `qs-sony` bounds itself to.
+            // The same 4096 `jayos-sony` bounds itself to.
             line: 4096,
             idle: Duration::from_secs(5),
         }
@@ -339,7 +339,7 @@ impl Bound {
             let live_now = Arc::clone(&live);
             let id = ClientId(next.fetch_add(1, Ordering::SeqCst));
             let spawned = std::thread::Builder::new()
-                .name("qs-sonyd-client".to_string())
+                .name("jayos-sonyd-client".to_string())
                 .spawn(move || {
                     converse(stream, id, dispatch.as_ref(), limits);
                     live_now.fetch_sub(1, Ordering::SeqCst);
@@ -405,7 +405,7 @@ const BUSY_GRACE: Duration = Duration::from_millis(100);
 /// its receive queue makes the kernel send RST rather than FIN, and an RST
 /// discards whatever was already written in the other direction. So a daemon
 /// that answers a client and closes without reading the rest of what the
-/// client sent destroys its own reply: `qs-sony`, which writes a line and then
+/// client sent destroys its own reply: `jayos-sony`, which writes a line and then
 /// reads, gets ECONNRESET and reports the daemon as unreachable. It is a race,
 /// which is worse than a bug that always happens -- it passes in a test and
 /// fails on a loaded machine.
@@ -455,7 +455,7 @@ struct TooLong;
 /// every chunk.
 ///
 /// End of input without a newline is accepted as a complete line, because
-/// `qs-sony` writes its line and then reads -- it does not shut down its
+/// `jayos-sony` writes its line and then reads -- it does not shut down its
 /// writing half -- and a client that closes instead is saying the same thing.
 fn read_line(stream: &mut UnixStream, limit: usize) -> Result<Option<String>, TooLong> {
     let mut buf: Vec<u8> = Vec::with_capacity(128);

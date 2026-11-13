@@ -1,7 +1,7 @@
 //! The daemon's public contract: the state document and the command language.
 //!
 //! Both are checked against the C++ implementation this replaces, because the
-//! point of matching it is interoperability. `qs-sony` carries a schema-version
+//! point of matching it is interoperability. `jayos-sony` carries a schema-version
 //! guard so that a reader works against either daemon; a document that differs
 //! in key order, in a default, or in one escape rule defeats that guard while
 //! still looking like valid JSON.
@@ -148,7 +148,7 @@ fn the_document_is_the_c_implementations_plus_the_keys_this_daemon_adds() {
     // because an unknown key is one a JSON parser skips -- but a reader doing
     // a byte comparison does not, and this test is the place that difference
     // is recorded. `schema_version` deliberately does NOT move for it: 1 is
-    // shared with the C++ daemon and `qs-sony`'s version guard would then
+    // shared with the C++ daemon and `jayos-sony`'s version guard would then
     // reject that daemon's documents, which breaks interop in the direction
     // that actually matters.
     let got = state::serialize(&mock_state(), "0.2.3");
