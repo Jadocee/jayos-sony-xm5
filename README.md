@@ -60,6 +60,23 @@ connected, and a test fails if one asks anything else. Until 2026-11-06 they
 inherited the build's `PATH` and dialled whatever was connected;
 `tests/sony_daemon.rs`'s header has what that cost.
 
+## Linking
+
+The Rust is linked with [mold](https://github.com/rui314/mold), by JayOS's
+owner's call of 2026-11-13. `packaging/arch/PKGBUILD`'s `build()` and
+`check()` append `-C link-arg=-fuse-ld=mold` to `RUSTFLAGS`, after makepkg's
+own and once, and `makedepends` names `mold`. `RUSTFLAGS` and not a cargo
+config, because makepkg sets `RUSTFLAGS`, which cargo takes in place of every
+config's flags. `.cargo/config.toml` gives cargo run in this tree the same
+flag, and `tools/check.sh` links with Rust's own LLD where mold is not
+installed, and lists that as not exercised. `tests/shell/test-packaging.sh`
+holds each of these.
+
+Run on 2026-11-13 under rustc 1.97.0 and mold 2.30.0: build() in 34 s and
+check() in 21 s, run as makepkg runs them, `qs-sony` and `qs-sonyd` both
+carrying `mold 2.30.0` in their `.comment` section, and `tools/check.sh`
+found nothing to fix. Not run: Arch's makepkg.conf and Arch's mold 3.0.0.
+
 ## Releases
 
 A release is a signed tag, `vMAJOR.MINOR.PATCH`, on `main`, made by the

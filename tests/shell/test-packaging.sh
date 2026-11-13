@@ -122,5 +122,67 @@ else
 fi
 
 echo
+echo "build() and check(): mold links them"
+# MOLD LINKS IT, through RUSTFLAGS: build() and check(), run as makepkg runs
+# them, start cargo with the RUSTFLAGS makepkg.conf sets or with none, and
+# mold's flag after it, once -- in one shell, where check() inherits build()'s
+# export, and check() alone, where it must say mold itself. A stand-in cargo
+# writes down its verb and the RUSTFLAGS it was started with.
+if grep -qE "^makedepends=\(.*'mold'" "$RECIPE"; then
+    pass "makedepends names mold"
+else
+    bad "makedepends does not name mold, which build() and check() link with"
+fi
+FAKEBIN="$WORK/fakebin"
+mkdir -p "$FAKEBIN" "$WORK/msrc/target/release"
+printf '#!/usr/bin/env bash\nprintf "%%s|%%s\\n" "$1" "${RUSTFLAGS-<unset>}" >> %q\nexit 0\n' "$WORK/cargo.flags" > "$FAKEBIN/cargo"
+chmod +x "$FAKEBIN/cargo"
+for h in qs-sony qs-sonyd; do printf '#!/bin/sh\n' > "$WORK/msrc/target/release/$h"; chmod +x "$WORK/msrc/target/release/$h"; done
+mold_run() { # mold_run <functions> [VAR=value...]: the cargo calls they made, verb|RUSTFLAGS
+    : > "$WORK/cargo.flags"
+    ( env -u RUSTFLAGS PATH="$FAKEBIN:$PATH" srcdir="$WORK/msrc" "${@:2}" \
+          bash -eE -c 'startdir="$1"; source "$2"; '"$1" _ "$ROOT/packaging/arch" "$RECIPE" ) >/dev/null 2>&1
+    paste -sd' ' "$WORK/cargo.flags"
+}
+mold_case() { # mold_case <description> <expected> <functions> [VAR=value...]
+    local got
+    got=$(mold_run "${@:3}")
+    if [[ "$got" == "$2" ]]; then pass "$1"; else bad "$1: got '$got', not '$2'"; fi
+}
+mold_case "build() and check() in one shell: makepkg's RUSTFLAGS and mold's flag after them, once" \
+    "build|-Cforce-frame-pointers=yes -C link-arg=-fuse-ld=mold test|-Cforce-frame-pointers=yes -C link-arg=-fuse-ld=mold" \
+    "build; check" RUSTFLAGS=-Cforce-frame-pointers=yes
+mold_case "check() alone, in a shell of its own, says mold itself" \
+    "test|-Cforce-frame-pointers=yes -C link-arg=-fuse-ld=mold" "check" RUSTFLAGS=-Cforce-frame-pointers=yes
+mold_case "mold's flag alone where makepkg set none" "build|-C link-arg=-fuse-ld=mold" "build"
+mold_case "and not a second time over a RUSTFLAGS that has it already" \
+    "build|-C link-arg=-fuse-ld=mold" "build" RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+
+echo
+echo ".cargo/config.toml and tools/check.sh: mold links the tests"
+# The file's one setting, as a TOML reader reads it, which tools/check.sh's
+# `cargo test`, run in the checkout, reads; and check.sh's fallback, read
+# rather than run, since running it is the whole test build.
+MOLD_CFG="$ROOT/.cargo/config.toml"
+want='{"target": {"x86_64-unknown-linux-gnu": {"rustflags": ["-C", "link-arg=-fuse-ld=mold"]}}}'
+if [[ ! -f "$MOLD_CFG" ]]; then
+    bad ".cargo/config.toml is gone, and nothing links the tests with mold"
+elif python3 -c 'import tomllib' 2>/dev/null; then
+    got=$(python3 -I -c 'import json, sys, tomllib; print(json.dumps(tomllib.load(open(sys.argv[1], "rb")), sort_keys=True))' "$MOLD_CFG" 2>&1)
+    if [[ "$got" == "$want" ]]; then pass "it holds one setting: mold, as the x86_64 linker's argument"; else bad ".cargo/config.toml reads as $got"; fi
+else
+    echo "  skip .cargo/config.toml as TOML not exercised: no python3 with tomllib"
+fi
+CHECK_CODE=$(grep -vE '^[[:space:]]*#' "$ROOT/tools/check.sh")
+if grep -qxF '    run "cargo test" env "${link[@]}" cargo test --locked --quiet' <<<"$CHECK_CODE" \
+   && grep -qxF '    if ! command -v ld.mold >/dev/null 2>&1; then' <<<"$CHECK_CODE" \
+   && grep -qxF '        link=(RUSTFLAGS=)' <<<"$CHECK_CODE" \
+   && grep -qxF '        SKIPPED+=("cargo test, linked with mold")' <<<"$CHECK_CODE"; then
+    pass "tools/check.sh tests through it, falling back only with no ld.mold, listed as not exercised"
+else
+    bad "tools/check.sh's cargo test does not link through .cargo/config.toml's mold, falling back only without it"
+fi
+
+echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

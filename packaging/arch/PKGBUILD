@@ -32,8 +32,9 @@ license=('MIT')
 # asks for the connected headset (src/bin/qs-sonyd.rs, find_headset).
 depends=('glibc' 'gcc-libs' 'bash' 'procps-ng' 'util-linux' 'jq' 'bluez' 'bluez-utils')
 # cargo is provided by the rustup package as well as by rust, so either
-# toolchain satisfies makepkg.
-makedepends=('cargo')
+# toolchain satisfies makepkg; and mold links what build() and check() build
+# (_link_with_mold, below).
+makedepends=('cargo' 'mold')
 # !lto: makepkg's lto adds -flto=auto to C flags that reach nothing here; the
 # Rust side has the profile's own fat LTO. !debug: the profile strips, and a
 # -debug split package of a stripped build is empty.
@@ -46,6 +47,19 @@ _helpers=(qs-sony qs-sonyd)
 
 # The checkout. Resolved, so a symlinked packaging/ directory still finds it.
 _tree() { realpath "$startdir/../.."; }
+
+# mold links the build and the tests, by JayOS's owner's call of 2026-11-13,
+# "use https://github.com/rui314/mold for building rust" -- .cargo/config.toml
+# says how the flag works. Appended to RUSTFLAGS, and not left to that file:
+# makepkg.conf sets RUSTFLAGS, which cargo takes in place of every config's
+# flags, and cargo here runs from $srcdir, where it would not find the file
+# anyway. Appended once, whether makepkg runs build() and check() in one shell
+# or two, so the two builds do not differ by a repeated flag. JayOS's
+# pkgbuilds/jayos-sony-xm5 does the same, in the same words.
+_link_with_mold() {
+    [[ " ${RUSTFLAGS:-} " == *" -C link-arg=-fuse-ld=mold "* ]] \
+        || export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-fuse-ld=mold"
+}
 
 prepare() {
     # The lockfile is the pin: --locked refuses to resolve anything Cargo.lock
@@ -62,12 +76,14 @@ build() {
     # Under $srcdir, so a CARGO_TARGET_DIR the building user set globally is
     # not where package() looks, and `makepkg -C` cleans it.
     export CARGO_TARGET_DIR="$srcdir/target"
+    _link_with_mold
     cargo build --frozen --release --manifest-path "$(_tree)/Cargo.toml"
 }
 
 check() {
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR="$srcdir/target"
+    _link_with_mold
     cargo test --frozen --manifest-path "$(_tree)/Cargo.toml"
     local h
     for h in "${_helpers[@]}"; do
