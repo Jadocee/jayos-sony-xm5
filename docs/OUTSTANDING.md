@@ -1,8 +1,8 @@
 # What is still outstanding
 
-Dated 2026-10-02. This is the successor of jayos's plan 23
-(jayos: `docs/plans/23-sony-xm5-outstanding.md`), which listed fourteen things
-the Sony integration lacked when it lived in jayos. The integration moved here
+Dated 2026-10-02. This is the successor of jayos's plan 23, which listed
+fourteen things the Sony integration lacked when it lived in jayos, and which
+followed it here on 2026-11-13 as `docs/PLAN.md`. The integration moved here
 and the plan was implemented as far as a machine with no Bluetooth adapter and
 no headset allows. Each item below says what is code now, what it stands on,
 and what would settle the rest.
