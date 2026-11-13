@@ -25,9 +25,9 @@ connection struct pins out (`decode_connection`, `encode_connection`).
 
 Where they show:
 
-- `qs-sony decode <file|dir>` prints `grounds` beside every frame (`null` for a
+- `jayos-sony decode <file|dir>` prints `grounds` beside every frame (`null` for a
   frame nothing decodes).
-- `qs-sonyd` logs every frame a command becomes with its tier and the struct it
+- `jayos-sonyd` logs every frame a command becomes with its tier and the struct it
   was built as (`Note::Sent`), so someone with a headset knows which writes to
   compare against a capture first.
 - `payload::CAPTURED` lists the captured keys and a test holds it to the corpus

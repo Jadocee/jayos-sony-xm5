@@ -1,9 +1,9 @@
 //! The Sony headphone daemon.
 //!
-//!     qs-sonyd                    run in the foreground until stopped
-//!     qs-sonyd once               dial, publish one document, exit
-//!     qs-sonyd --alerts           also ask the headset for its confirmations
-//!     qs-sonyd --record=DIR       also write every frame, both ways, as fixtures
+//!     jayos-sonyd                    run in the foreground until stopped
+//!     jayos-sonyd once               dial, publish one document, exit
+//!     jayos-sonyd --alerts           also ask the headset for its confirmations
+//!     jayos-sonyd --record=DIR       also write every frame, both ways, as fixtures
 //!
 //! Any other flag, a `--record` with no directory, or `--alerts=` anything is
 //! refused with exit 2 before anything starts.
@@ -66,7 +66,7 @@ use std::time::{Duration, Instant};
 /// How long a client's line may wait for the engine before it is told the
 /// daemon is busy.
 ///
-/// Under `qs-sony`'s own 3s per-operation timeout, so the client hears a
+/// Under `jayos-sony`'s own 3s per-operation timeout, so the client hears a
 /// reason rather than a closed socket. And STRICTLY OVER the engine's
 /// `Limits::ack_wait`, so an unanswering headset produces an error from the
 /// engine and not a timeout here: this timer starts in `Mailbox::dispatch`
@@ -195,7 +195,7 @@ enum Msg {
 /// envelope, with `emit::REFUSED` -- 2, nothing was attempted -- the status
 /// `emit::unknown_flag` gives a flag that is not known at all.
 fn refuse(message: &str) -> ExitCode {
-    eprintln!("qs-sonyd: {message}");
+    eprintln!("jayos-sonyd: {message}");
     let _ = emit::json(&serde_json::json!({ "ok": false, "error": message }));
     ExitCode::from(emit::REFUSED)
 }
@@ -209,7 +209,7 @@ fn main() -> ExitCode {
     let once = match args.command_or("run") {
         "run" => false,
         "once" => true,
-        other => return emit::unknown_command("qs-sonyd", other, &["run", "once"]),
+        other => return emit::unknown_command("jayos-sonyd", other, &["run", "once"]),
     };
     // REFUSED, NOT IGNORED, and before anything is bound -- the policy
     // `support::cli`'s header gives for a helper whose callers read the exit
@@ -245,7 +245,7 @@ fn main() -> ExitCode {
 
     // The document exists before anything is connected. A reader that finds no
     // file cannot tell a daemon that has not started from one that has nothing
-    // to say, and `qs-sony available` is the difference.
+    // to say, and `jayos-sony available` is the difference.
     // Off unless asked for: a headset with alerts on waits for an answer, and
     // only a page that shows the question can give one. `encode::alerts_on`
     // has the long form.
@@ -256,7 +256,7 @@ fn main() -> ExitCode {
     // asks something. `a_one_shot_run_says_whether_it_asks_for_alerts` reads
     // this line, and it is the only check on the flag reaching the session.
     if session.alerts() {
-        eprintln!("qs-sonyd: --alerts: the headset will be asked for its confirmations");
+        eprintln!("jayos-sonyd: --alerts: the headset will be asked for its confirmations");
     }
     // Opened before the link exists, so a directory that cannot be made fails
     // the start rather than the first frame. `capture::Recorder` says what
@@ -272,14 +272,17 @@ fn main() -> ExitCode {
 
     let stopper = bound.stopper();
     let dialler_post = post.clone();
+    // Thread names of fifteen bytes or fewer, which is what Linux keeps of
+    // one: with the program's name in front, as they were while it was
+    // qs-sonyd, these would be cut short in ps and a debugger.
     let dialler = std::thread::Builder::new()
-        .name("qs-sonyd-dial".to_string())
+        .name("sonyd-dial".to_string())
         .spawn(move || dial_forever(dialler_post, once))
         .expect("the dialler thread starts");
 
     let socket_post = post.clone();
     let server = std::thread::Builder::new()
-        .name("qs-sonyd-socket".to_string())
+        .name("sonyd-socket".to_string())
         .spawn(move || {
             bound.serve(Arc::new(Mailbox { post: socket_post }), serve::Limits::default())
         })
@@ -466,14 +469,14 @@ fn wall_ms() -> u64 {
 /// on: a full disk must not cost the person their headset.
 fn note_record(result: std::io::Result<()>) {
     if let Err(e) = result {
-        eprintln!("qs-sonyd: cannot record a frame: {e}");
+        eprintln!("jayos-sonyd: cannot record a frame: {e}");
     }
 }
 
 fn publish(session: &Session) {
     let path = sony::state_file();
     if let Err(e) = sony::atomic_write(&path, &session.document()) {
-        eprintln!("qs-sonyd: cannot write {}: {e}", path.display());
+        eprintln!("jayos-sonyd: cannot write {}: {e}", path.display());
     }
 }
 
@@ -486,17 +489,17 @@ fn publish(session: &Session) {
 /// stream of notes would still be wrong the day something does.
 fn log(note: &Note) {
     match note {
-        Note::BadFrame(e) => eprintln!("qs-sonyd: unreadable frame: {e:?}"),
+        Note::BadFrame(e) => eprintln!("jayos-sonyd: unreadable frame: {e:?}"),
         Note::Unread { command, kind, len } => {
-            eprintln!("qs-sonyd: no decoder for command {command:?} kind {kind:?} len {len}");
+            eprintln!("jayos-sonyd: no decoder for command {command:?} kind {kind:?} len {len}");
         }
         Note::Ambiguous { command, kind, len } => {
-            eprintln!("qs-sonyd: ambiguous message: command {command:?} kind {kind:?} len {len}");
+            eprintln!("jayos-sonyd: ambiguous message: command {command:?} kind {kind:?} len {len}");
         }
-        Note::Refused(refusal) => eprintln!("qs-sonyd: refused: {}", refusal.message()),
-        Note::StrayAck { seq } => eprintln!("qs-sonyd: an acknowledgement for seq {seq}, unasked"),
+        Note::Refused(refusal) => eprintln!("jayos-sonyd: refused: {}", refusal.message()),
+        Note::StrayAck { seq } => eprintln!("jayos-sonyd: an acknowledgement for seq {seq}, unasked"),
         Note::Sent { command, kind, tier, set } => {
-            eprintln!("qs-sonyd: sending {set} (command {command:#04x} kind {kind:#04x}), {tier}");
+            eprintln!("jayos-sonyd: sending {set} (command {command:#04x} kind {kind:#04x}), {tier}");
         }
     }
 }
@@ -719,13 +722,13 @@ mod tests {
     fn timing_lets_the_engine_answer_before_the_socket_gives_up() {
         // The three deadlines a client's command passes through, innermost
         // first: the engine's acknowledgement wait, this socket's dispatch
-        // wait, qs-sony's per-operation timeout. Each must be strictly
+        // wait, jayos-sony's per-operation timeout. Each must be strictly
         // inside the next, or the answer from the inner one reaches nobody.
         // The socket's timer starts before the engine stamps the frame, so
         // equal is not enough for the first pair.
         let engine = Duration::from_millis(Limits::default().ack_wait);
         assert!(engine < DISPATCH_WAIT, "the engine's answer would arrive after the socket gave up");
-        assert!(DISPATCH_WAIT < Duration::from_secs(3), "the socket's answer would arrive after qs-sony gave up");
+        assert!(DISPATCH_WAIT < Duration::from_secs(3), "the socket's answer would arrive after jayos-sony gave up");
     }
 
     /// The pauses a run of the same outcome produces, from a fresh start.

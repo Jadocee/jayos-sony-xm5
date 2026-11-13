@@ -19,8 +19,8 @@ which kind of evidence stands behind it.
 | `src/mdr/` | The protocol: framing (`frame`), what a payload means (`payload`), and the frames this port is willing to send (`encode`). Pure: no I/O. |
 | `src/sony/` | The daemon's contract: the state document (`state`), the command language (`command`), the engine (`session`), RFCOMM and SDP (`link`, `sdp`), the control socket (`serve`), and playback of a capture (`replay`). |
 | `src/capture.rs` | Captures: a btsnoop trace read down to its MDR frames (`import`), the daemon's own link written as fixtures (`Recorder`), and which outstanding items a capture settles (`settle`). |
-| `src/bin/qs-sonyd.rs` | The daemon. Dials the connected headset, publishes `$XDG_STATE_HOME/sony-headphones/status.json`, answers commands on a private Unix socket. `--alerts` asks the headset for its confirmations; `--record=DIR` writes every frame, both ways. |
-| `src/bin/qs-sony.rs` | The client: `status`, `devices`, `send <command…>`, `available`, `replay <dir>`, and for a capture `decode`, `import` and `settle`. |
+| `src/bin/jayos-sonyd.rs` | The daemon. Dials the connected headset, publishes `$XDG_STATE_HOME/sony-headphones/status.json`, answers commands on a private Unix socket. `--alerts` asks the headset for its confirmations; `--record=DIR` writes every frame, both ways. |
+| `src/bin/jayos-sony.rs` | The client: `status`, `devices`, `send <command…>`, `available`, `replay <dir>`, and for a capture `decode`, `import` and `settle`. |
 | `src/support/` | Argument parsing, JSON on stdout and bounded subprocesses -- a copy of three jayos files; `src/support/mod.rs` says why a copy. |
 | `scripts/sony-daemon-process.sh` | Starts and stops the daemon, keeps its stderr, removes its document on stop. Knows nothing about whether it *should* run; that is the shell's setting. |
 | `contract/` | What JayOS tests its side against: a real state document, every key it carries, the command language, the model prefixes. Generated; see `contract/README.md`. |
@@ -35,8 +35,10 @@ On Arch, from a checkout:
 
     cd packaging/arch && makepkg -si
 
-That installs `qs-sonyd` and `qs-sony` to `/usr/bin` and the process script to
-`/usr/lib/jayos-sony-xm5/sony-daemon-process`. JayOS carries a recipe of its
+That installs `jayos-sonyd` and `jayos-sony` to `/usr/bin` and the process script to
+`/usr/lib/jayos-sony-xm5/sony-daemon-process`. The two were `qs-sonyd` and
+`qs-sony`, the names they had in JayOS, until the owner's call of 2026-11-13
+renamed them before the first release; nothing reads the old names. JayOS carries a recipe of its
 own that fetches this repository, and offers it from its Headphones and
 Devices pages when a Sony headset is connected and this is not installed.
 
@@ -73,7 +75,7 @@ installed, and lists that as not exercised. `tests/shell/test-packaging.sh`
 holds each of these.
 
 Run on 2026-11-13 under rustc 1.97.0 and mold 2.30.0: build() in 34 s and
-check() in 21 s, run as makepkg runs them, `qs-sony` and `qs-sonyd` both
+check() in 21 s, run as makepkg runs them, `jayos-sony` and `jayos-sonyd` both
 carrying `mold 2.30.0` in their `.comment` section, and `tools/check.sh`
 found nothing to fix. Not run: Arch's makepkg.conf and Arch's mold 3.0.0.
 

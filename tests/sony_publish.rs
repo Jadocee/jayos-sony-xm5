@@ -19,7 +19,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 fn work(name: &str) -> PathBuf {
-    let base = std::env::temp_dir().join(format!("qs-sony-publish-{name}-{}", std::process::id()));
+    let base = std::env::temp_dir().join(format!("jayos-sony-publish-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     fs::create_dir_all(&base).expect("a working directory");
     base

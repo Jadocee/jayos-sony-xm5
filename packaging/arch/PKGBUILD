@@ -28,8 +28,8 @@ url="https://github.com/Jadocee/jayos-sony-xm5"
 license=('MIT')
 # glibc and gcc-libs for the Rust binaries. bash, procps-ng (pgrep, pkill),
 # util-linux (setsid) and jq for sony-daemon-process. bluez for bluetoothd,
-# which qs-sonyd dials through, and bluez-utils for bluetoothctl, which it
-# asks for the connected headset (src/bin/qs-sonyd.rs, find_headset).
+# which jayos-sonyd dials through, and bluez-utils for bluetoothctl, which it
+# asks for the connected headset (src/bin/jayos-sonyd.rs, find_headset).
 depends=('glibc' 'gcc-libs' 'bash' 'procps-ng' 'util-linux' 'jq' 'bluez' 'bluez-utils')
 # cargo is provided by the rustup package as well as by rust, so either
 # toolchain satisfies makepkg; and mold links what build() and check() build
@@ -43,7 +43,7 @@ options=('!lto' '!debug')
 # The binaries this package installs, on one line. package() iterates this
 # array rather than naming them twice, and jayos's integration check reads it
 # to know which helpers a package provides.
-_helpers=(qs-sony qs-sonyd)
+_helpers=(jayos-sony jayos-sonyd)
 
 # The checkout. Resolved, so a symlinked packaging/ directory still finds it.
 _tree() { realpath "$startdir/../.."; }

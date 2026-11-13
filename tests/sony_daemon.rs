@@ -1,10 +1,10 @@
-//! `qs-sonyd`, run as a process.
+//! `jayos-sonyd`, run as a process.
 //!
 //! The wiring is the one part of this daemon that cannot be reached by a unit
 //! test: three threads, a mailbox, a socket and a dialler, and none of it
 //! means anything until they are started together. So these tests start the
 //! real binary, with `XDG_STATE_HOME` and `XDG_RUNTIME_DIR` pointed at a
-//! temporary directory, and hold it to what `qs-sony` and the Headphones page
+//! temporary directory, and hold it to what `jayos-sony` and the Headphones page
 //! actually depend on.
 //!
 //! THERE IS NO HEADSET HERE, BY CONSTRUCTION, and that is not a limitation of
@@ -31,7 +31,7 @@
 //! So every daemon here is given a `PATH` of one directory, holding one
 //! program: [`BLUETOOTHCTL`], an adapter with nothing connected. `bluetoothctl`
 //! is the only program the daemon runs (`find_headset` in
-//! `src/bin/qs-sonyd.rs`), and its Bluetooth sockets are only opened to a
+//! `src/bin/jayos-sonyd.rs`), and its Bluetooth sockets are only opened to a
 //! device that listing names -- so with nothing listed, nothing is dialled.
 //! The script writes down what it was asked, and
 //! `the_daemon_asks_this_suites_bluetoothctl_and_never_the_machines` holds
@@ -45,8 +45,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const DAEMON: &str = env!("CARGO_BIN_EXE_qs-sonyd");
-const READER: &str = env!("CARGO_BIN_EXE_qs-sony");
+const DAEMON: &str = env!("CARGO_BIN_EXE_jayos-sonyd");
+const READER: &str = env!("CARGO_BIN_EXE_jayos-sony");
 
 /// The `bluetoothctl` every daemon here finds: an adapter that is up with
 /// nothing connected, which writes each question it is asked, one line of
@@ -79,7 +79,7 @@ struct Home {
 
 impl Home {
     fn new(name: &str) -> Home {
-        let base = std::env::temp_dir().join(format!("qs-sonyd-{name}-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("jayos-sonyd-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("state")).expect("a state directory");
         std::fs::create_dir_all(base.join("run")).expect("a runtime directory");
@@ -119,18 +119,18 @@ impl Home {
         std::fs::read_to_string(self.base.join("bluetoothctl.log")).unwrap_or_default()
     }
 
-    /// `qs-sony <verb>` against this home, with a `qs-devices` in jayos's
+    /// `jayos-sony <verb>` against this home, with a `qs-devices` in jayos's
     /// helpers' directory that lists one Sony headset -- the inventory the
     /// page's Devices tab reads.
     ///
     /// The helpers' directory and NOT `PATH`, which is left as the test runner
     /// has it: that is the session a display manager starts, where
     /// `~/.local/bin` is not on `PATH` and a bare-name spawn found nothing.
-    /// The daemon is found beside `qs-sony` in cargo's target directory, which
+    /// The daemon is found beside `jayos-sony` in cargo's target directory, which
     /// is where the package installs them too -- no variable points at it.
     ///
     /// Left as it is but for one directory put ahead of it: the daemon's, with
-    /// its `bluetoothctl` and nothing else. `qs-sony` runs no `bluetoothctl`
+    /// its `bluetoothctl` and nothing else. `jayos-sony` runs no `bluetoothctl`
     /// today, and if it ever does, it is this suite's that answers rather than
     /// the machine's. `qs-devices` is still on no `PATH` it is given.
     fn reader(&self, verb: &str) -> std::process::Output {
@@ -154,7 +154,7 @@ impl Home {
             .env("QS_BIN_DIR", &bin)
             .env_remove("QS_BIN")
             .output()
-            .expect("qs-sony runs")
+            .expect("jayos-sony runs")
     }
 
     fn state_file(&self) -> PathBuf {
@@ -215,7 +215,7 @@ fn ask(socket: &Path, line: &str) -> std::io::Result<String> {
 
 #[test]
 fn a_daemon_with_no_headset_publishes_a_document_that_says_so() {
-    // THE FIRST THING ANY READER NEEDS. `qs-sony available` and the Headphones
+    // THE FIRST THING ANY READER NEEDS. `jayos-sony available` and the Headphones
     // page both read this file, and a file that is not there cannot be told
     // from a daemon that has not started -- so it exists before anything is
     // connected, and it is honest about there being nothing.
@@ -224,7 +224,7 @@ fn a_daemon_with_no_headset_publishes_a_document_that_says_so() {
 
     wait_for("the document to appear", || home.state_file().exists());
     let value = document(&home.state_file());
-    assert_eq!(value["schema_version"], 1, "the version qs-sony gates on");
+    assert_eq!(value["schema_version"], 1, "the version jayos-sony gates on");
     assert_eq!(value["connected"], false);
     assert_eq!(value["phase"], "idle");
     assert!(
@@ -456,7 +456,7 @@ fn a_flag_the_daemon_does_not_take_is_refused_before_anything_starts() {
 
 #[test]
 fn the_reader_tells_a_running_daemon_from_the_document_it_left_behind() {
-    // `qs-sony` is what the Devices tab, the Headphones page and the doctor
+    // `jayos-sony` is what the Devices tab, the Headphones page and the doctor
     // read. Two things it must get right that the file alone cannot tell it:
     // a daemon that is UP with no headset (the document says connected:false,
     // and "Start daemon" would start a second copy that refuses the lock),
@@ -472,7 +472,7 @@ fn the_reader_tells_a_running_daemon_from_the_document_it_left_behind() {
         serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("devices printed JSON: {out:?}"));
     assert_eq!(devices["daemonRunning"], true, "{devices}");
     assert_eq!(devices["daemonReporting"], false, "no headset is connected here: {devices}");
-    assert_eq!(devices["project"], "qs-sonyd", "{devices}");
+    assert_eq!(devices["project"], "jayos-sonyd", "{devices}");
     assert_eq!(devices["devices"][0]["name"], "WH-1000XM5", "{devices}");
     assert_eq!(devices["devices"][0]["action"], "configure", "a running daemon was offered a start: {devices}");
     let out = home.reader("status");

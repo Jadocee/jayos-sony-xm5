@@ -32,11 +32,11 @@ command -v jq >/dev/null 2>&1 || { echo "  skip acceptance not exercised: no jq"
 # Stand-ins for every tool the session runs, each of which writes its name and
 # arguments to a log when it is run at all.
 mkdir -p "$WORK/bin"
-for tool in qs-sony qs-sonyd btmon bluetoothctl cargo; do
+for tool in jayos-sony jayos-sonyd btmon bluetoothctl cargo; do
     cat > "$WORK/bin/$tool" <<EOF
 #!/usr/bin/env bash
 echo "$tool \$*" >> "$WORK/ran"
-if [[ "$tool" == qs-sony && "\${1:-}" == devices ]]; then
+if [[ "$tool" == jayos-sony && "\${1:-}" == devices ]]; then
     printf '%s\n' '{"devices":[{"name":"WF-1000XM5","sony":true}]}'
 fi
 EOF
@@ -68,16 +68,16 @@ fi
 missing=""
 for want in "btmon -w $WORK/capture/trace.btsnoop" \
             "connect a second device" \
-            "qs-sonyd run --alerts --record=$WORK/capture/record" \
-            "qs-sony send connection stable" \
-            "qs-sony send playback pause" \
-            "qs-sony send general multipoint off" \
-            "qs-sony send alert yes" \
+            "jayos-sonyd run --alerts --record=$WORK/capture/record" \
+            "jayos-sony send connection stable" \
+            "jayos-sony send playback pause" \
+            "jayos-sony send general multipoint off" \
+            "jayos-sony send alert yes" \
             "disconnect the headset and connect it again" \
             "screenshot" \
             "--test sony_link -- --ignored" \
-            "qs-sony import $WORK/capture/trace.btsnoop --out=$WORK/capture/imported" \
-            "qs-sony settle $WORK/capture/record"; do
+            "jayos-sony import $WORK/capture/trace.btsnoop --out=$WORK/capture/imported" \
+            "jayos-sony settle $WORK/capture/record"; do
     [[ "$out" == *"$want"* ]] || missing+=$'\n    '"$want"
 done
 if [[ -z "$missing" ]]; then
@@ -90,7 +90,7 @@ echo
 echo "a real run that cannot run says so with 2"
 
 rm -f "$WORK/ran"
-out=$(QS_SONY="$WORK/nothing" bash "$SCRIPT" --out="$WORK/capture" 2>&1)
+out=$(JAYOS_SONY="$WORK/nothing" bash "$SCRIPT" --out="$WORK/capture" 2>&1)
 status=$?
 if [[ "$status" == "2" && "$out" == *"cannot run"* ]]; then
     pass "a missing tool is exit 2"
@@ -106,7 +106,7 @@ if [[ "$status" == "2" && "$out" == *"no WH-1000XM5 is connected"* ]]; then
 else
     bad "the wrong headset answered $status: $out"
 fi
-if [[ "$(cat "$WORK/ran" 2>/dev/null)" == "qs-sony devices" ]]; then
+if [[ "$(cat "$WORK/ran" 2>/dev/null)" == "jayos-sony devices" ]]; then
     pass "and it asked which headset before it started anything"
 else
     bad "before refusing it ran: $(cat "$WORK/ran" 2>/dev/null)"

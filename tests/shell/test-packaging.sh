@@ -73,6 +73,20 @@ else
     bad "_helpers is not a one-line array"
 fi
 
+# The process script starts the daemon from where package() puts it unless
+# SONY_DAEMON says otherwise, and every suite that runs the script says
+# otherwise -- so nothing but this reads the default. It is the daemon among
+# _helpers, under /usr/bin: the two were renamed from qs-sony and qs-sonyd on
+# 2026-11-13, and a default left at the old name would start nothing.
+daemon=$(tr ' ' '\n' <<< "$helpers" | grep -E 'd$' | head -1)
+default=$(grep -vE '^[[:space:]]*#' "$ROOT/scripts/sony-daemon-process.sh" \
+          | sed -n 's|^DAEMON="${SONY_DAEMON:-\([^}]*\)}"$|\1|p')
+if [[ -n "$daemon" && "$default" == "/usr/bin/$daemon" ]]; then
+    pass "the process script starts /usr/bin/$daemon, where package() installs it"
+else
+    bad "the process script's daemon is '${default:-none}', and package() installs /usr/bin/${daemon:-?}"
+fi
+
 echo
 echo "package(), into a scratch pkgdir"
 
@@ -137,7 +151,7 @@ FAKEBIN="$WORK/fakebin"
 mkdir -p "$FAKEBIN" "$WORK/msrc/target/release"
 printf '#!/usr/bin/env bash\nprintf "%%s|%%s\\n" "$1" "${RUSTFLAGS-<unset>}" >> %q\nexit 0\n' "$WORK/cargo.flags" > "$FAKEBIN/cargo"
 chmod +x "$FAKEBIN/cargo"
-for h in qs-sony qs-sonyd; do printf '#!/bin/sh\n' > "$WORK/msrc/target/release/$h"; chmod +x "$WORK/msrc/target/release/$h"; done
+for h in jayos-sony jayos-sonyd; do printf '#!/bin/sh\n' > "$WORK/msrc/target/release/$h"; chmod +x "$WORK/msrc/target/release/$h"; done
 mold_run() { # mold_run <functions> [VAR=value...]: the cargo calls they made, verb|RUSTFLAGS
     : > "$WORK/cargo.flags"
     ( env -u RUSTFLAGS PATH="$FAKEBIN:$PATH" srcdir="$WORK/msrc" "${@:2}" \

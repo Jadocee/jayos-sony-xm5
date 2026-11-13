@@ -7,7 +7,7 @@ and the plan was implemented as far as a machine with no Bluetooth adapter and
 no headset allows. Each item below says what is code now, what it stands on,
 and what would settle the rest.
 
-`qs-sony settle <capture-dir>` answers the last column mechanically for every
+`jayos-sony settle <capture-dir>` answers the last column mechanically for every
 item a capture can settle; `tools/acceptance.sh` runs the session that produces
 that capture; `docs/CAPTURE.md` explains the session step by step.
 
@@ -122,8 +122,8 @@ screenshot itself needs a compositor.
 
 **14. Persistence.** That a general-setting write survives a reconnect is
 `delarosa1312/omarchy-sony-xm5`'s finding, not this package's. With
-`qs-sonyd --alerts` the headset asks before a multipoint change, and either
-`qs-sony send alert yes|no` or jayos's Headphones page, which draws the
+`jayos-sonyd --alerts` the headset asks before a multipoint change, and either
+`jayos-sony send alert yes|no` or jayos's Headphones page, which draws the
 question with Yes and No since jayos `927e3ef`, answers it. A drop of this link
 while a yes to a disconnecting change is on the wire, or within five seconds
 of the headset acknowledging it, is a clean close rather than an error; the
@@ -133,7 +133,7 @@ that is what the transport says it was. The persistence itself is step 5 of
 
 ## What a capture of the WH-1000XM5 settles
 
-`qs-sony settle` needs the capture to name itself a WH-1000XM5 before it calls
+`jayos-sony settle` needs the capture to name itself a WH-1000XM5 before it calls
 anything settled: the same bytes from the corpus's earbuds are evidence about
 the earbuds. Against the corpus it reports every frame item open, which is the
 right answer. Against synthetic WH captures in `tests/capture.rs` it settles

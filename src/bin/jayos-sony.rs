@@ -1,14 +1,14 @@
 //! Sony headphone status and control, for the shell.
 //!
-//!     qs-sony status              the daemon's state, plus what we derive
-//!     qs-sony devices             connected headsets, and what to offer for each
-//!     qs-sony send <command...>   one command over the daemon's socket
-//!     qs-sony available           exit 0 if the daemon is reachable
-//!     qs-sony replay <dir> [--peer=NAME]   the document a capture produces
-//!     qs-sony decode <file|dir>   every frame: what it is, what it says, on what grounds
-//!     qs-sony import <btsnoop> --out=DIR [--channel=N] [--exclude=CMD,...]
+//!     jayos-sony status              the daemon's state, plus what we derive
+//!     jayos-sony devices             connected headsets, and what to offer for each
+//!     jayos-sony send <command...>   one command over the daemon's socket
+//!     jayos-sony available           exit 0 if the daemon is reachable
+//!     jayos-sony replay <dir> [--peer=NAME]   the document a capture produces
+//!     jayos-sony decode <file|dir>   every frame: what it is, what it says, on what grounds
+//!     jayos-sony import <btsnoop> --out=DIR [--channel=N] [--exclude=CMD,...]
 //!                                 a Bluetooth trace's MDR frames, as fixtures
-//!     qs-sony settle <dir>        which outstanding items a capture settles
+//!     jayos-sony settle <dir>        which outstanding items a capture settles
 //!
 //! A thin wrapper over the headphone daemon: something that speaks the Sony |
 //! Sound Connect protocol, publishes JSON state and accepts commands on a
@@ -16,7 +16,7 @@
 //!
 //! WHICH DAEMON, AND WHY THIS DOES NOT CARE
 //!
-//! `qs-sonyd`, in this tree, or sony-headphones-linux, the C++ project it
+//! `jayos-sonyd`, in this tree, or sony-headphones-linux, the C++ project it
 //! replaces. They publish the same document at the same path and take the same
 //! socket commands, deliberately -- so nothing here asks which one is running,
 //! and someone who already installed the C++ one keeps working.
@@ -77,7 +77,7 @@ const INVENTORY_TIMEOUT: Duration = Duration::from_secs(15);
 /// separate codebase and the shell should say where it is rather than pull it
 /// silently.
 /// The daemon in this package, which is the one to prefer when both are present.
-const NATIVE_DAEMON: &str = "qs-sonyd";
+const NATIVE_DAEMON: &str = "jayos-sonyd";
 
 /// jayos's device inventory, which this reads and does not own. Its output is
 /// part of the contract between the two repositories -- see
@@ -193,11 +193,11 @@ struct Devices {
     /// DECIDED HERE RATHER THAN IN THE PAGE. The page used to run `systemctl
     /// --user start sony-headphones` -- a unit that only the C++ project
     /// installs -- so the one action it offered did nothing on a machine
-    /// running `qs-sonyd`, and did nothing quietly. Which daemon is present is
+    /// running `jayos-sonyd`, and did nothing quietly. Which daemon is present is
     /// a question this program already answers for `daemon_installed`, and
     /// answering it twice in two languages is how the two got out of step.
     /// The page runs this only for the C++ project's unit; when `project` is
-    /// `qs-sonyd` it starts the daemon through jayos's `sony-daemon.sh`
+    /// `jayos-sonyd` it starts the daemon through jayos's `sony-daemon.sh`
     /// instead, so the daemon's stderr lands in the log (see jayos's
     /// `DevicesPage.startSony`).
     start: Vec<String>,
@@ -209,9 +209,9 @@ struct Devices {
 ///
 /// This used to build the two paths itself, and its socket fallback without
 /// `XDG_RUNTIME_DIR` was `/tmp/sony-headphones/daemon.sock` -- while both
-/// daemons bind `/tmp/sony-headphones-<uid>/daemon.sock` (qs-sonyd through
+/// daemons bind `/tmp/sony-headphones-<uid>/daemon.sock` (jayos-sonyd through
 /// `sony::runtime_dir`, the C++ one through its `runtimeDirectory`). So
-/// `qs-sony send` from a shell with no session said "the daemon socket is
+/// `jayos-sony send` from a shell with no session said "the daemon socket is
 /// not there" against a running daemon.
 fn state_path() -> PathBuf {
     sony_xm5::sony::state_file()
@@ -226,9 +226,9 @@ fn socket_path() -> PathBuf {
 /// (`QS_BIN="${QS_BIN_DIR:-${QS_BIN:-$HOME/.local/bin}}"`).
 ///
 /// ONLY FOR `qs-devices`, which is jayos's and is installed there. It used to
-/// find `qs-sonyd` too, when both were built from jayos's workspace into that
+/// find `jayos-sonyd` too, when both were built from jayos's workspace into that
 /// directory. They are not any more: this package installs both of its
-/// binaries side by side, and a `qs-sonyd` left in `~/.local/bin` by a jayos
+/// binaries side by side, and a `jayos-sonyd` left in `~/.local/bin` by a jayos
 /// build from before the move is stale -- found first, it would be the daemon
 /// `devices` offered to start. See [`native_daemon`].
 fn bin_dir() -> PathBuf {
@@ -238,7 +238,7 @@ fn bin_dir() -> PathBuf {
         .unwrap_or_else(|| sony_xm5::sony::home().join(".local/bin"))
 }
 
-/// Where `qs-sonyd` is, as an absolute path, or `None`.
+/// Where `jayos-sonyd` is, as an absolute path, or `None`.
 ///
 /// BESIDE THIS PROGRAM FIRST, then `PATH`. The two are built and installed
 /// together -- `/usr/bin` from the package, `target/<profile>` from a checkout
@@ -267,7 +267,7 @@ fn native_daemon_beside(dir: Option<&Path>) -> Option<PathBuf> {
 ///
 /// It was spawned by bare name, which is a `PATH` search -- the very lookup
 /// [`native_daemon`]'s comment explains fails in a session a display manager
-/// started, where `~/.local/bin` is not on `PATH`. So `qs-sony devices` got an
+/// started, where `~/.local/bin` is not on `PATH`. So `jayos-sony devices` got an
 /// empty inventory on exactly the machines the shell runs on, and the Devices
 /// page drew no headsets. jayos installs it where [`bin_dir`] points.
 fn inventory_program() -> Option<PathBuf> {
@@ -288,7 +288,7 @@ fn executable(at: &Path) -> bool {
 /// its `configure` or `start` branches, and the page offered to install
 /// something that was already there.
 ///
-/// `qs-sonyd` is this tree's own daemon and is checked first: where both exist,
+/// `jayos-sonyd` is this tree's own daemon and is checked first: where both exist,
 /// the local one is the one being talked to.
 fn daemon_installed() -> bool {
     native_daemon().is_some() || proc::have("sony-headphonesd") || proc::have("sony-headphonesctl")
@@ -296,7 +296,7 @@ fn daemon_installed() -> bool {
 
 /// Whether a daemon is alive behind the state file.
 ///
-/// The test `qs-sonyd` itself makes before refusing to start a second copy:
+/// The test `jayos-sonyd` itself makes before refusing to start a second copy:
 /// `serve::bind` takes `flock(LOCK_EX|LOCK_NB)` on `daemon.lock` beside the
 /// socket and holds it for the daemon's life, and the kernel releases it
 /// however the process ends -- so a lock that can be taken is a daemon that
@@ -335,8 +335,8 @@ enum Missing {
     Unreadable,
     /// A document written by a daemon newer than this wrapper.
     Newer,
-    /// A readable document with no daemon behind it. `qs-sonyd` leaves its
-    /// last document in place on purpose (`qs-sonyd once` exists to do
+    /// A readable document with no daemon behind it. `jayos-sonyd` leaves its
+    /// last document in place on purpose (`jayos-sonyd once` exists to do
     /// exactly that) and installs no signal handler, so a daemon killed by
     /// anything but `sony-daemon-process stop` (which jayos's
     /// `sony-daemon.sh stop` calls) leaves a file that may still say
@@ -960,7 +960,7 @@ fn main() -> ExitCode {
             }
         }
         other => emit::unknown_command(
-            "qs-sony",
+            "jayos-sony",
             other,
             &["status", "devices", "send", "available", "replay", "decode", "import", "settle"],
         ),
@@ -970,7 +970,7 @@ fn main() -> ExitCode {
 /// The document a daemon would publish after receiving a capture.
 ///
 /// For a person with a capture directory -- a corpus here, or what
-/// `qs-sonyd --record` wrote -- who wants to see what the daemon makes of it
+/// `jayos-sonyd --record` wrote -- who wants to see what the daemon makes of it
 /// without a headset in reach. The same function produces the contract's
 /// `state.example.json`; see `sony::replay` for why the playback is
 /// deterministic and why only received frames are played.
@@ -1630,7 +1630,7 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("qs-sony-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jayos-sony-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         dir
@@ -1640,7 +1640,7 @@ mod tests {
     fn the_reader_uses_the_daemons_own_paths() {
         // The failure this replaces: without XDG_RUNTIME_DIR this dialled
         // /tmp/sony-headphones/daemon.sock while both daemons bind
-        // /tmp/sony-headphones-<uid>/daemon.sock, so `qs-sony send` from a
+        // /tmp/sony-headphones-<uid>/daemon.sock, so `jayos-sony send` from a
         // bare shell said the socket was not there against a running daemon.
         let env = Env::take(&["XDG_RUNTIME_DIR", "XDG_STATE_HOME", "HOME"]);
         env.set("XDG_RUNTIME_DIR", None);
@@ -1667,7 +1667,7 @@ mod tests {
         env.set("XDG_RUNTIME_DIR", Some(&run));
         assert!(!daemon_running(), "nothing has started, so nothing is running");
 
-        // qs-sonyd: the lock serve::bind takes, held for the daemon's life.
+        // jayos-sonyd: the lock serve::bind takes, held for the daemon's life.
         let held = sony_xm5::sony::serve::bind(&sony_xm5::sony::socket_path()).expect("bind");
         assert!(daemon_running(), "a daemon holding the lock was not seen");
         drop(held);
@@ -1741,7 +1741,7 @@ mod tests {
     fn the_native_daemon_is_the_one_beside_this_program_before_path() {
         // Built and installed together, so the sibling is the daemon this
         // client was built against. jayos's helpers' directory is NOT looked
-        // in: a qs-sonyd there is a build from before the move.
+        // in: a jayos-sonyd there is a build from before the move.
         let env = Env::take(&["QS_BIN_DIR", "QS_BIN", "HOME"]);
         let dir = scratch("native");
         let daemon = dir.join(NATIVE_DAEMON);
@@ -1871,10 +1871,10 @@ mod tests {
         // sony-headphones` unconditionally, which is a unit only the C++
         // project installs. On a machine running the in-tree daemon the one
         // action the page offered did nothing, and did nothing quietly.
-        let native = Path::new("/opt/qs/bin/qs-sonyd");
+        let native = Path::new("/opt/qs/bin/jayos-sonyd");
         // Absolute, as found: what the page hands to execDetached must not
         // depend on quickshell's PATH any more than finding it did.
-        assert_eq!(start_command(Some(native), true), vec!["/opt/qs/bin/qs-sonyd"]);
+        assert_eq!(start_command(Some(native), true), vec!["/opt/qs/bin/jayos-sonyd"]);
         // The native one wins even when both are installed: it is the one this
         // tree ships, tests and can fix.
         assert_eq!(start_command(Some(native), true), start_command(Some(native), false));

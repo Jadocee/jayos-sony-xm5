@@ -14,6 +14,10 @@ repository's. It is not among the documents `tests/mdr_citations.rs` holds to
 the corpus: its quotes are the record of what was read then, and the
 corrections below say which were wrong.
 
+**The programs it names were renamed the same day**, by the owner's call
+("Rename the qs-sony items"): `qs-sony` is `jayos-sony` and `qs-sonyd` is
+`jayos-sonyd`. The plan keeps the names it was written with.
+
 **Moved, then settled as far as a machine with no Bluetooth allows — 2026-10-02.**
 The Sony integration left this tree. The MDR protocol, `qs-sonyd`, `qs-sony`,
 their tests and the 70-frame corpus are the package `jayos-sony-xm5`
