@@ -84,8 +84,9 @@ found nothing to fix. Not run: Arch's makepkg.conf and Arch's mold 3.0.0.
 A release is a signed tag, `vMAJOR.MINOR.PATCH`, on `main`, made by the
 owner with `tools/release.sh`; JayOS builds the release its recipe pins, not
 `main`. `docs/RELEASES.md` has how one is made, what is refused, and the
-owner's steps before the first. None exists yet: `.github/allowed_signers`
-holds no key until the owner adds one.
+owner's steps before the first. None exists yet; `.github/allowed_signers`
+holds the owner's key since 2026-11-16, so the first can be made once `main`
+has it.
 
 ## Licence
 

@@ -75,7 +75,8 @@ Once, before the first release:
    `git config user.signingkey <the public key's file>`.
 2. Its public half in `.github/allowed_signers`, one line in ssh-keygen's
    ALLOWED SIGNERS format with `namespaces="git"`, committed and merged to
-   `main`. The file is empty until then, and every release is refused.
+   `main`. Every release is refused until then. Done on 2026-11-16, with
+   the key JayOS's, jayos-audio's and jayos-bluetooth's files hold.
 3. The same line in JayOS's `.github/allowed_signers`, which its
    `tools/package-release.sh` verifies a release against.
 
