@@ -46,8 +46,19 @@ syntax() {
 run "shell syntax" syntax
 
 step "cargo test"
+# .cargo/config.toml links the tests with mold. Where mold is not installed
+# an empty RUSTFLAGS, which cargo takes in place of that file's flags, links
+# them with Rust's own linker instead, and the link is listed as not
+# exercised: the tests still run, by a linker that is not the one the recipe
+# builds with.
 if command -v cargo >/dev/null 2>&1; then
-    run "cargo test" cargo test --locked --quiet
+    link=()
+    if ! command -v ld.mold >/dev/null 2>&1; then
+        link=(RUSTFLAGS=)
+        echo "  mold is not installed (pacman -S mold), so the tests link with Rust's own linker"
+        SKIPPED+=("cargo test, linked with mold")
+    fi
+    run "cargo test" env "${link[@]}" cargo test --locked --quiet
 else
     echo "  cargo is not installed"
     SKIPPED+=("cargo test")

@@ -755,7 +755,7 @@ fn a_capture_of_the_target_headset_settles_what_it_holds() {
     // read as it.
     for (multipoint_reads, code, state) in [(0x00u8, 0, "settled"), (0x01, 1, "contradicted")] {
         let dir = recorded("WH-1000XM5", &format!("cli-{multipoint_reads}"), &all(multipoint_reads));
-        let (got, report) = qs_sony(&["settle", dir.to_str().expect("a path")]);
+        let (got, report) = jayos_sony(&["settle", dir.to_str().expect("a path")]);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(got, code, "{report}");
         let six = report["items"].as_array().and_then(|items| items.iter().find(|i| i["item"] == 6)).cloned();
@@ -949,23 +949,23 @@ fn an_available_upscaler_says_nothing_about_an_unavailable_one() {
 
 // ── the command line ────────────────────────────────────────────────────────
 
-const READER: &str = env!("CARGO_BIN_EXE_qs-sony");
-const DAEMON: &str = env!("CARGO_BIN_EXE_qs-sonyd");
+const READER: &str = env!("CARGO_BIN_EXE_jayos-sony");
+const DAEMON: &str = env!("CARGO_BIN_EXE_jayos-sonyd");
 
-fn qs_sony(args: &[&str]) -> (i32, serde_json::Value) {
-    let out = std::process::Command::new(READER).args(args).output().expect("qs-sony runs");
+fn jayos_sony(args: &[&str]) -> (i32, serde_json::Value) {
+    let out = std::process::Command::new(READER).args(args).output().expect("jayos-sony runs");
     let value = serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
     (out.status.code().unwrap_or(-1), value)
 }
 
 #[test]
-fn qs_sony_decodes_imports_and_settles_from_the_command_line() {
+fn jayos_sony_decodes_imports_and_settles_from_the_command_line() {
     let corpus = fixture_dir();
     let corpus = corpus.to_str().expect("a path");
 
     // decode: every frame, with grounds where something decodes it -- the
     // same 25 `mdr_payload.rs` pins.
-    let (code, frames) = qs_sony(&["decode", corpus]);
+    let (code, frames) = jayos_sony(&["decode", corpus]);
     assert_eq!(code, 0);
     let frames = frames.as_array().expect("an array");
     assert_eq!(frames.len(), 70);
@@ -973,15 +973,15 @@ fn qs_sony_decodes_imports_and_settles_from_the_command_line() {
 
     // settle: the corpus is the wrong headset, so items stay open -- exit 1;
     // an empty directory examined nothing -- exit 2, not 0 and not 1.
-    let (code, report) = qs_sony(&["settle", corpus]);
+    let (code, report) = jayos_sony(&["settle", corpus]);
     assert_eq!(code, 1, "{report}");
     assert_eq!(report["model"], "WF-1000XM5");
     let empty = std::env::temp_dir().join(format!("sony-capture-empty-{}", std::process::id()));
     std::fs::create_dir_all(&empty).expect("a directory");
-    assert_eq!(qs_sony(&["settle", empty.to_str().expect("a path")]).0, 2);
+    assert_eq!(jayos_sony(&["settle", empty.to_str().expect("a path")]).0, 2);
     // Nor did a directory that is not there, which used to answer 1 -- the
     // status that means "some items are open".
-    let (code, report) = qs_sony(&["settle", "/nonexistent/sony-capture"]);
+    let (code, report) = jayos_sony(&["settle", "/nonexistent/sony-capture"]);
     assert_eq!(code, 2, "{report}");
     assert_eq!(report["ok"], false);
 
@@ -992,7 +992,7 @@ fn qs_sony_decodes_imports_and_settles_from_the_command_line() {
     let trace_file = base.join("trace.btsnoop");
     std::fs::write(&trace_file, trace(2001, true)).expect("written");
     let out = base.join("fixtures");
-    let (code, summary) = qs_sony(&[
+    let (code, summary) = jayos_sony(&[
         "import",
         trace_file.to_str().expect("a path"),
         &format!("--out={}", out.display()),
@@ -1008,7 +1008,7 @@ fn qs_sony_decodes_imports_and_settles_from_the_command_line() {
     // keep out.
     let typo = base.join("typo");
     for name in ["PERI_RET_PARAMS", "peri_ret_param"] {
-        let (code, said) = qs_sony(&[
+        let (code, said) = jayos_sony(&[
             "import",
             trace_file.to_str().expect("a path"),
             &format!("--out={}", typo.display()),
@@ -1023,7 +1023,7 @@ fn qs_sony_decodes_imports_and_settles_from_the_command_line() {
         String::from_utf8(out.stdout).expect("utf-8")
     };
     assert_eq!(replayed(out.to_str().expect("a path")), replayed(corpus));
-    let (code, _) = qs_sony(&["import", trace_file.to_str().expect("a path"), "--out=/dev/null/x", "--channel=40"]);
+    let (code, _) = jayos_sony(&["import", trace_file.to_str().expect("a path"), "--out=/dev/null/x", "--channel=40"]);
     assert_eq!(code, 1, "a channel past 30 is refused");
     let _ = std::fs::remove_dir_all(&base);
     let _ = std::fs::remove_dir_all(&empty);
@@ -1049,7 +1049,7 @@ fn a_recording_directory_that_cannot_be_made_stops_the_daemon_at_start() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("qs-sonyd starts");
+        .expect("jayos-sonyd starts");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let status = loop {
         if let Some(status) = child.try_wait().expect("it can be waited on") {

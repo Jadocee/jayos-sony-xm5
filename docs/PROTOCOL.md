@@ -55,7 +55,7 @@ daemon's (`tests/sony_contract.rs` parses the first two as ours, and
 
 ### What the daemon shares with `sony-headphones-linux`
 
-`qs-sonyd` is written to be read by anything written against the C++ daemon,
+`jayos-sonyd` is written to be read by anything written against the C++ daemon,
 and `rust/crates/qs-hw/tests/sony_contract.rs` holds it to that byte for byte.
 It needs `bluetoothd`: `bluez` installed and `bluetooth.service` enabled, which
 `bootstrap.d/80-desktop.sh` offers together, because `bluez-utils` alone gives
@@ -140,7 +140,7 @@ with no radio.
   labelled from the device's own word, greyed while `enabled` is `null`.
 * **The log.** The daemon's stderr goes to `daemon.log` beside `status.json`;
   `sony-daemon.sh start` first moves the previous run to `daemon.log.1`. The
-  lines worth reading are `qs-sonyd: no decoder for command … kind … len …` —
+  lines worth reading are `jayos-sonyd: no decoder for command … kind … len …` —
   a message the port has no decoder for, which is what extending it for an
   untested headset starts from. The Headphones page names the file when the
   daemon is switched on and not running.
@@ -149,7 +149,7 @@ with no radio.
   (`initSendRunnable`, 1250 ms between sends) — then the link is dropped and
   redialled, as the C++ daemon's `failConnection` does after libmdr's 3 s ACK
   wait. A client waiting on that frame is answered at the first expiry, which
-  is inside the daemon socket's 2 s dispatch wait and `qs-sony`'s 3 s
+  is inside the daemon socket's 2 s dispatch wait and `jayos-sony`'s 3 s
   per-operation timeout.
 
   **This used to end "(libmdr itself never retransmits)", which is wrong.**
@@ -167,15 +167,15 @@ with no radio.
   unexplained by either implementation.
 
 Two things are not shared. The C++ daemon removes `status.json` when it exits;
-`qs-sonyd` leaves its last document behind (`qs-sonyd once` exists to do
+`jayos-sonyd` leaves its last document behind (`jayos-sonyd once` exists to do
 exactly that), so `sony-daemon.sh stop` removes the file itself, and a daemon
-killed any other way leaves a file behind — which `qs-sony` reports as
+killed any other way leaves a file behind — which `jayos-sony` reports as
 `"reason":"stale"` rather than as the last thing the daemon said, because it
-first checks that a daemon is there: the socket lock `qs-sonyd` holds for its
+first checks that a daemon is there: the socket lock `jayos-sonyd` holds for its
 life, or (for the C++ daemon, which takes no lock) the socket answering.
 And the Headphones page's lifecycle strip goes through `sony-daemon.sh`, which
-knows only `qs-sonyd`: with the C++ daemon alone the page reports no daemon
-installed and reads nothing, while `qs-sony` and the doctor recognise
+knows only `jayos-sonyd`: with the C++ daemon alone the page reports no daemon
+installed and reads nothing, while `jayos-sony` and the doctor recognise
 `sony-headphonesd` and read whichever daemon's document is there.
 
 ## History
@@ -218,7 +218,7 @@ sixth, the paired-device list, was added after this sentence was written.]*
    priority and the auto-power-off timer, while the five bands and clear bass
    survive. **Read evidence, theirs, unreproducible here.**
    `HeadphonesPage.qml` no longer draws preset buttons, and
-   `qs-sony send eq-band` / `send clear-bass` now exist — the same
+   `jayos-sony send eq-band` / `send clear-bass` now exist — the same
    `EqEbbSetParamEq` message the preset verb already sent, with the steps
    replaced instead of the preset. Their hardest-won workaround is not needed
    in this port and the encoder says so: libmdr's staging lets half an
@@ -241,7 +241,7 @@ sixth, the paired-device list, was added after this sentence was written.]*
    object is not a link" section is about the opposite failure, their library
    answering reads from cache long after the headphones are off, and reading it
    is what sent us to look at what ours does when the link ends. And
-   `qs-sonyd once` treated "nothing awaiting an acknowledgement" as "the
+   `jayos-sonyd once` treated "nothing awaiting an acknowledgement" as "the
    headset has finished answering", so a one-shot run could publish a document
    saying `connected: true` with no battery in it. Their sentence is the one
    that names the window — "the handshake completing does not mean the state
@@ -325,14 +325,14 @@ sixth, the paired-device list, was added after this sentence was written.]*
 Acting on it would have meant probing RFCOMM channels on arbitrary Bluetooth
 devices.
 
-### The `qs-sony` environment race
+### The `jayos-sony` environment race
 
 Moved from jayos's `docs/REVIEW.md`, where it was the third of three things
 read and not executed. The three `Env::hold()` calls it describes, and the
 greps that fail if one goes, came here with the code: the greps are
 `tests/shell/test-source-guards.sh`.
 
-3. **The `qs-sony` environment race was diagnosed from the source and has not
+3. **The `jayos-sony` environment race was diagnosed from the source and has not
    been reproduced on demand.** `a_daemon_is_running_while_it_holds_the_lock_or_answers_the_socket`
    failed about twice in eight workspace runs and passed in isolation every
    time; the reading is that `Command::spawn` walks `environ` while another

@@ -6,7 +6,7 @@
 #   tools/acceptance.sh --dry-run        say every step, run none of them
 #
 # Exit 0: every item a capture can settle is settled. 1: some are still open,
-# or contradicted -- `qs-sony settle` lists which. 2: could not run -- a tool is
+# or contradicted -- `jayos-sony settle` lists which. 2: could not run -- a tool is
 # missing, no WH-1000XM5 is connected, or nothing was captured -- which is not
 # the same answer as either and is not reported as one. --dry-run exits 0
 # having run nothing.
@@ -38,8 +38,8 @@ done
 
 # The package's binaries, wherever this checkout's PATH finds them. A checkout
 # that has not been installed points these at target/release.
-QS_SONY="${QS_SONY:-qs-sony}"
-QS_SONYD="${QS_SONYD:-qs-sonyd}"
+JAYOS_SONY="${JAYOS_SONY:-jayos-sony}"
+JAYOS_SONYD="${JAYOS_SONYD:-jayos-sonyd}"
 RECORD="$OUT/record"
 TRACE="$OUT/trace.btsnoop"
 IMPORTED="$OUT/imported"
@@ -59,7 +59,7 @@ ask() {
 cannot() { echo "acceptance: cannot run: $*" >&2; exit 2; }
 
 say "what this needs"
-for tool in "$QS_SONY" "$QS_SONYD" btmon bluetoothctl cargo jq; do
+for tool in "$JAYOS_SONY" "$JAYOS_SONYD" btmon bluetoothctl cargo jq; do
     if command -v "$tool" >/dev/null 2>&1; then
         printf '  have %s\n' "$tool"
     elif [[ $DRY -eq 1 ]]; then
@@ -69,10 +69,10 @@ for tool in "$QS_SONY" "$QS_SONYD" btmon bluetoothctl cargo jq; do
     fi
 done
 if [[ $DRY -eq 0 ]]; then
-    # The model, from the inventory qs-sony itself reads. Another Sony headset
+    # The model, from the inventory jayos-sony itself reads. Another Sony headset
     # would produce a capture, and settle would rightly settle nothing with it.
-    "$QS_SONY" devices | jq -e '.devices[]? | select(.name | test("WH-1000XM5"))' >/dev/null 2>&1 \
-        || cannot "no WH-1000XM5 is connected (qs-sony devices)"
+    "$JAYOS_SONY" devices | jq -e '.devices[]? | select(.name | test("WH-1000XM5"))' >/dev/null 2>&1 \
+        || cannot "no WH-1000XM5 is connected (jayos-sony devices)"
 fi
 
 say "1. trace the link from before the daemon dials (items 1-7, 10, 11)"
@@ -88,33 +88,33 @@ say "2. the daemon, recording, with alerts on (items 6, 14)"
 # control channel, and this one would refuse to start.
 run sh -c "command -v sony-daemon.sh >/dev/null && sony-daemon.sh off || true"
 run mkdir -p "$RECORD"
-printf '  $ %s run --alerts --record=%s &\n' "$QS_SONYD" "$RECORD"
+printf '  $ %s run --alerts --record=%s &\n' "$JAYOS_SONYD" "$RECORD"
 if [[ $DRY -eq 0 ]]; then
-    "$QS_SONYD" run --alerts --record="$RECORD" 2>"$OUT/daemon.log" &
+    "$JAYOS_SONYD" run --alerts --record="$RECORD" 2>"$OUT/daemon.log" &
     DAEMON_PID=$!
     trap 'kill "$DAEMON_PID" 2>/dev/null' EXIT
     sleep 8
 fi
-run "$QS_SONY" status
+run "$JAYOS_SONY" status
 
 say "3. every verb, once (items 2-6)"
 for verb in "noise anc" "noise ambient" "ambient-level 10" "focus-on-voice on" "noise anc" \
             "connection stable" "connection quality" "playback pause" "playback play" \
             "dsee on" "volume 30"; do
     # shellcheck disable=SC2086  # the verb is words on purpose
-    run "$QS_SONY" send $verb
+    run "$JAYOS_SONY" send $verb
 done
 
 say "4. a general-setting write, its alert, and the answer (item 14)"
-run "$QS_SONY" send general multipoint off
-ask "if the headset asked (qs-sony status shows .alert), answer it: qs-sony send alert yes"
-run "$QS_SONY" status
+run "$JAYOS_SONY" send general multipoint off
+ask "if the headset asked (jayos-sony status shows .alert), answer it: jayos-sony send alert yes"
+run "$JAYOS_SONY" status
 
 say "5. disconnect and reconnect, then read it back (item 14)"
 ask "disconnect the headset and connect it again (bluetoothctl disconnect, then connect)"
 [[ $DRY -eq 0 ]] && sleep 10
-run "$QS_SONY" status
-run "$QS_SONY" send general multipoint on
+run "$JAYOS_SONY" status
+run "$JAYOS_SONY" send general multipoint on
 
 say "6. the page, drawn against the live document (item 13)"
 ask "open the Headphones page in jayos and take a screenshot into $OUT"
@@ -129,14 +129,14 @@ if [[ $DRY -eq 0 ]]; then
     trap - EXIT
 fi
 ask "stop btmon (Ctrl-C in its terminal)"
-run "$QS_SONY" import "$TRACE" --out="$IMPORTED"
-run "$QS_SONY" settle "$IMPORTED"
-printf '  $ %s settle %s\n' "$QS_SONY" "$RECORD"
+run "$JAYOS_SONY" import "$TRACE" --out="$IMPORTED"
+run "$JAYOS_SONY" settle "$IMPORTED"
+printf '  $ %s settle %s\n' "$JAYOS_SONY" "$RECORD"
 if [[ $DRY -eq 1 ]]; then
     printf '\ndry run: nothing was run\n'
     exit 0
 fi
-"$QS_SONY" settle "$RECORD"
+"$JAYOS_SONY" settle "$RECORD"
 status=$?
 cat <<EOF
 

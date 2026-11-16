@@ -154,8 +154,8 @@ pub struct Limits {
     /// How long a sent frame may go unacknowledged before it is resent, and
     /// -- once [`Limits::retries`] are spent -- before the link is dropped.
     ///
-    /// STRICTLY UNDER the daemon socket's `DISPATCH_WAIT` (2s in qs-sonyd),
-    /// which is itself under `qs-sony`'s 3s per-operation timeout, so that a
+    /// STRICTLY UNDER the daemon socket's `DISPATCH_WAIT` (2s in jayos-sonyd),
+    /// which is itself under `jayos-sony`'s 3s per-operation timeout, so that a
     /// client waiting on a frame hears the engine's answer at the FIRST
     /// expiry rather than the socket's own timeout. Equal would not do: the
     /// socket starts its timer before the engine has stamped the frame, so
@@ -292,7 +292,7 @@ pub struct Session {
     /// the link's remaining input is ignored until [`Session::link_down`] or
     /// [`Session::link_up`] closes the window.
     hanging_up: bool,
-    /// `qs-sonyd --alerts`: ask the headset to put its confirmations to us.
+    /// `jayos-sonyd --alerts`: ask the headset to put its confirmations to us.
     /// Off by default -- see [`encode::alerts_on`] for why that is the
     /// person's decision.
     alerts: bool,
@@ -339,7 +339,7 @@ impl Session {
     }
 
     /// Whether this session will ask for the headset's alerts -- what
-    /// `qs-sonyd` says in its log at start, read back from the session so the
+    /// `jayos-sonyd` says in its log at start, read back from the session so the
     /// line cannot say one thing while the session does another.
     pub fn alerts(&self) -> bool {
         self.alerts
@@ -613,7 +613,7 @@ impl Session {
         }
         // A client is answered at the FIRST expiry and not kept for the
         // retries: the daemon's socket gives the client up after
-        // DISPATCH_WAIT and `qs-sony` after 3s, so an answer that waited for
+        // DISPATCH_WAIT and `jayos-sony` after 3s, so an answer that waited for
         // the second resend would reach nobody -- and `ack_wait` is under
         // DISPATCH_WAIT so that even this first answer arrives in time. The
         // frame itself goes on being retried for the link's sake, with

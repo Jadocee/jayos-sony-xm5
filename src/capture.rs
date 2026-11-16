@@ -15,7 +15,7 @@
 //!   snoop log (1002), or an unencapsulated one (1001) -- walked down through
 //!   ACL reassembly, L2CAP to PSM 3, and RFCOMM UIH frames to the MDR byte
 //!   stream on one DLCI.
-//! - [`Recorder`]: `qs-sonyd --record=DIR`, the daemon writing both directions
+//! - [`Recorder`]: `jayos-sonyd --record=DIR`, the daemon writing both directions
 //!   of its own link as it runs.
 //! - A directory either of those wrote, read back by [`load`] for [`settle`].
 //!
@@ -777,7 +777,7 @@ fn split(pieces: &[Piece]) -> (Vec<(u64, Direction, Vec<u8>)>, usize) {
 
 /// Whether `name` is a command name either table declares -- the names
 /// `--exclude` takes. A name that is not one matches no frame, so excluding
-/// it would leave in whatever the person meant to keep out; `qs-sony import`
+/// it would leave in whatever the person meant to keep out; `jayos-sony import`
 /// refuses it instead.
 pub fn is_command_name(name: &str) -> bool {
     T1_COMMANDS.iter().chain(T2_COMMANDS).any(|(_, n)| *n == name)
@@ -806,7 +806,7 @@ pub fn write_fixtures(imported: &Imported, dir: &Path, exclude: &[String]) -> io
 
 // ── recording ───────────────────────────────────────────────────────────────
 
-/// `qs-sonyd --record=DIR`: both directions of the daemon's link, as fixtures.
+/// `jayos-sonyd --record=DIR`: both directions of the daemon's link, as fixtures.
 ///
 /// Received bytes arrive in whatever pieces a `read` returned, so they go
 /// through a scanner of their own; sent bytes are one whole frame per

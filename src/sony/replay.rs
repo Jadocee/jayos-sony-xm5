@@ -8,7 +8,7 @@
 //! one written by hand to look like one, which would only ever contain the
 //! fields its author remembered -- and the only way to get a real document
 //! without a headset is to feed captured frames to the same `Session` the
-//! daemon runs. `qs-sony replay` does that for a person, and the contract test
+//! daemon runs. `jayos-sony replay` does that for a person, and the contract test
 //! does it to produce `contract/state.example.json`.
 //!
 //! DETERMINISTIC, BECAUSE IT IS COMPARED BYTE FOR BYTE. The frames are taken
@@ -19,7 +19,7 @@
 //! change.
 //!
 //! RECEIVED FRAMES ONLY. A capture directory may also hold the frames the host
-//! sent (`-tx.` in the name, as `qs-sonyd --record` writes them). Feeding those
+//! sent (`-tx.` in the name, as `jayos-sonyd --record` writes them). Feeding those
 //! to a session would be feeding it its own questions as if the headset had
 //! asked them.
 

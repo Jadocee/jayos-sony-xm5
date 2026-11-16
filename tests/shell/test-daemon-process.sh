@@ -35,7 +35,7 @@ SCRIPT="$ROOT/scripts/sony-daemon-process.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/sony-process-test.XXXXXX")"
 cleanup() {
     # Anything this test started, whatever it did afterwards.
-    pkill -u "$(id -u)" -f -- "^$WORK/bin/qs-sonyd" 2>/dev/null || true
+    pkill -u "$(id -u)" -f -- "^$WORK/bin/jayos-sonyd" 2>/dev/null || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -52,38 +52,38 @@ command -v jq >/dev/null 2>&1 || {
 
 mkdir -p "$WORK/bin"
 # A daemon that does what a daemon does: says on stderr what it could not
-# decode -- the sentence qs-sonyd's log() prints, with the numbers written in
+# decode -- the sentence jayos-sonyd's log() prints, with the numbers written in
 # hex here where the real one prints them with {:?} -- then stays up until it
 # is killed.
 #
 # `exec -a "$0"` is what makes it look like the real one on the process table.
-# qs-sonyd is an ELF, so its command line STARTS with its path, which is what
+# jayos-sonyd is an ELF, so its command line STARTS with its path, which is what
 # the script's pattern is anchored to. A shell script run through its shebang
-# shows up as `bash /path/qs-sonyd` instead, and an anchored pattern would
+# shows up as `bash /path/jayos-sonyd` instead, and an anchored pattern would
 # rightly not match it -- so without this the suite would be testing a process
 # shape the real daemon never has.
 #
 # It also writes the arguments it was given, one per line, beside itself, so
 # the --alerts passthrough can be checked against what the daemon received
 # rather than against what the script meant to pass.
-cat > "$WORK/bin/qs-sonyd" <<'FAKE'
+cat > "$WORK/bin/jayos-sonyd" <<'FAKE'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "${0%/*}/argv"
-echo "qs-sonyd: no decoder for command 0x66 kind 0x17 len 3" >&2
+echo "jayos-sonyd: no decoder for command 0x66 kind 0x17 len 3" >&2
 exec -a "$0" sleep 300
 FAKE
-chmod +x "$WORK/bin/qs-sonyd"
+chmod +x "$WORK/bin/jayos-sonyd"
 
 # Every run points the script at the fake and HOME/XDG at the work tree, so
 # nothing here can touch a real daemon or a real log.
 STATE="$WORK/state/sony-headphones"
 run() { # run <verb...>
-    XDG_STATE_HOME="$WORK/state" HOME="$WORK" SONY_DAEMON="$WORK/bin/qs-sonyd" \
+    XDG_STATE_HOME="$WORK/state" HOME="$WORK" SONY_DAEMON="$WORK/bin/jayos-sonyd" \
         bash "$SCRIPT" "$@" 2>&1
 }
 field() { run --json | jq -r ".$1"; }
-alive() { pgrep -u "$(id -u)" -f -- "^$WORK/bin/qs-sonyd" >/dev/null 2>&1; }
-count() { pgrep -u "$(id -u)" -c -f -- "^$WORK/bin/qs-sonyd" 2>/dev/null || echo 0; }
+alive() { pgrep -u "$(id -u)" -f -- "^$WORK/bin/jayos-sonyd" >/dev/null 2>&1; }
+count() { pgrep -u "$(id -u)" -c -f -- "^$WORK/bin/jayos-sonyd" 2>/dev/null || echo 0; }
 
 echo "installed, and running, as two facts"
 
@@ -236,7 +236,7 @@ sleep 0.4
 echo
 echo "the pattern is the binary, not the word"
 
-# `pkill -f qs-sonyd` would match a person's editor open on the source, and
+# `pkill -f jayos-sonyd` would match a person's editor open on the source, and
 # matching it would mean `stop` kills their editor. The pattern is the full
 # path to this user's own binary, so a bystander that merely mentions the name
 # must survive.
@@ -247,12 +247,12 @@ echo "the pattern is the binary, not the word"
 # because the pattern is written in this file. It killed its own parent.
 run start >/dev/null
 sleep 0.3
-bash -c "exec -a 'vim qs-sonyd.rs' sleep 30" &
+bash -c "exec -a 'vim jayos-sonyd.rs' sleep 30" &
 named=$!
 # New here: a bystander whose command line holds the daemon's FULL PATH as an
 # argument -- a pager or an editor on the binary itself. jayos's pattern was
 # the path unanchored, which this command line contains, so `stop` killed it.
-bash -c "exec -a 'less $WORK/bin/qs-sonyd' sleep 30" &
+bash -c "exec -a 'less $WORK/bin/jayos-sonyd' sleep 30" &
 pathed=$!
 sleep 0.2
 run stop >/dev/null
@@ -260,7 +260,7 @@ sleep 0.4
 if kill -0 "$named" 2>/dev/null; then
     pass "stop leaves a process that merely mentions the daemon's name alone"
 else
-    bad "stop killed an unrelated process whose name contains 'qs-sonyd'"
+    bad "stop killed an unrelated process whose name contains 'jayos-sonyd'"
 fi
 if kill -0 "$pathed" 2>/dev/null; then
     pass "and one whose arguments name the daemon's full path"
@@ -327,7 +327,7 @@ else
 fi
 
 # New here: the C++ daemon publishes at the same path. A `stop` that found no
-# qs-sonyd to stop has no business deleting the document something else is
+# jayos-sonyd to stop has no business deleting the document something else is
 # keeping current.
 printf '{"schema_version":1,"connected":true}\n' > "$STATE/status.json"
 run stop >/dev/null

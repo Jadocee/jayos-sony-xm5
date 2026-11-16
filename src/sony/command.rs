@@ -210,12 +210,12 @@ pub fn parse_words(words: &[&str]) -> Result<Command, String> {
         // written against either. For `eq-preset` that also keeps the one test
         // that could overturn the finding reachable:
         //
-        //     qs-sony send eq-preset rock
+        //     jayos-sony send eq-preset rock
         //     sony-daemon.sh off && sony-daemon.sh on   # a fresh session
-        //     qs-sony status                            # did it keep it?
+        //     jayos-sony status                            # did it keep it?
         //
         // (`sony-daemon.sh` is jayos's; there is no systemd unit for
-        // qs-sonyd, whatever this example used to say.)
+        // jayos-sonyd, whatever this example used to say.)
         //
         // What changed is what we CLAIM: jayos's HeadphonesPage.qml shows the preset
         // the headset reports and no longer draws buttons that would report

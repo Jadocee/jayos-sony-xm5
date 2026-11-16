@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# The qs-sonyd process: start it, stop it, say whether it is up.
+# The jayos-sonyd process: start it, stop it, say whether it is up.
 #
 #   sony-daemon-process start     start it unless it is already running
 #   sony-daemon-process start --alerts
@@ -19,14 +19,14 @@
 # it: a package that edited a desktop's settings file would be a package that
 # breaks when the desktop moves the file.
 #
-# qs-sonyd opens an RFCOMM connection to a paired Sony headset and publishes
+# jayos-sonyd opens an RFCOMM connection to a paired Sony headset and publishes
 # its state. Three things follow from that and shape this script.
 #
-# NOT KILLED BY PATTERN ALONE. `pkill -f qs-sonyd` would also match a person's
-# `less qs-sonyd.rs`, and more to the point it would match the OTHER user's
+# NOT KILLED BY PATTERN ALONE. `pkill -f jayos-sonyd` would also match a person's
+# `less jayos-sonyd.rs`, and more to the point it would match the OTHER user's
 # daemon on a shared machine. The pattern is this user's processes only, and
 # it is the daemon's absolute path ANCHORED AT THE START of the command line:
-# unanchored, as it was in jayos, it still matched `less /usr/bin/qs-sonyd`,
+# unanchored, as it was in jayos, it still matched `less /usr/bin/jayos-sonyd`,
 # because that command line contains the path too.
 #
 # STDERR IS KEPT, in $XDG_STATE_HOME/sony-headphones/daemon.log beside the
@@ -35,8 +35,8 @@
 # and that line is the one thing needed to extend the port for a headset
 # nobody has fixtures for. One previous run is kept as daemon.log.1.
 #
-# THE DOCUMENT GOES WITH THE DAEMON. qs-sonyd leaves its last document behind
-# on purpose (`qs-sonyd once` exists to do exactly that) and installs no
+# THE DOCUMENT GOES WITH THE DAEMON. jayos-sonyd leaves its last document behind
+# on purpose (`jayos-sonyd once` exists to do exactly that) and installs no
 # signal handler, so after a kill the file still says whatever the headset was
 # doing. `stop` removes it, as the reference daemon does on exit
 # (sony-headphones-linux daemon_main.cpp, end of main).
@@ -45,8 +45,8 @@ set -uo pipefail
 
 # The packaged path, not a PATH search: this is started from a login hook and
 # from a settings page, neither of which runs the shell startup files. A
-# checkout points SONY_DAEMON at its own target/<profile>/qs-sonyd.
-DAEMON="${SONY_DAEMON:-/usr/bin/qs-sonyd}"
+# checkout points SONY_DAEMON at its own target/<profile>/jayos-sonyd.
+DAEMON="${SONY_DAEMON:-/usr/bin/jayos-sonyd}"
 
 # `:-` and not `-`: an empty XDG_STATE_HOME is treated as unset, which is what
 # the daemon's own state_dir does (src/sony/mod.rs), so the log lands beside
@@ -61,7 +61,7 @@ LOG="$LOG_DIR/daemon.log"
 #
 # pgrep and pkill take an extended regular expression, so the path is escaped:
 # a `.` in it would otherwise match any character. And it ends at a space or
-# the end of the line, so /usr/bin/qs-sonyd-old is not this daemon either.
+# the end of the line, so /usr/bin/jayos-sonyd-old is not this daemon either.
 PATTERN="^$(printf '%s' "$DAEMON" | sed 's/[][\.*^$+?(){}|]/\\&/g')( |$)"
 
 installed() { [[ -x "$DAEMON" ]]; }
@@ -71,7 +71,7 @@ installed() { [[ -x "$DAEMON" ]]; }
 running() { pgrep -u "$(id -u)" -f -- "$PATTERN" >/dev/null 2>&1; }
 
 # --alerts is passed through to the daemon and is the only argument start
-# takes. Alerts are a capture-session switch (qs-sonyd's encode::alerts_on
+# takes. Alerts are a capture-session switch (jayos-sonyd's encode::alerts_on
 # says why they are off by default), so anything else is refused here, before
 # the daemon detaches -- after that its own refusal (exit 2) goes to a log
 # nobody is reading. "Anything else" is every word after `start`, not only the
@@ -118,7 +118,7 @@ stop_it() {
     sleep 0.2
     pkill -9 -u "$(id -u)" -f -- "$PATTERN" 2>/dev/null || true
     # Only when this stopped a daemon. The C++ daemon publishes at the same
-    # path, and a `stop` with no qs-sonyd running must not delete the document
+    # path, and a `stop` with no jayos-sonyd running must not delete the document
     # a different daemon is keeping current.
     rm -f "$LOG_DIR/status.json"
     echo "stopped"

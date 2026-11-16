@@ -25,7 +25,7 @@ FAIL=0
 pass() { printf '  \033[32mok\033[0m   %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf '  \033[31mfail\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
-# ── every environment-touching qs-sony test is serialised, spawners included ──
+# ── every environment-touching jayos-sony test is serialised, spawners included ──
 #
 # WHY THIS IS HERE, in a shell suite, about a Rust test module.
 #
@@ -48,17 +48,17 @@ bad()  { printf '  \033[31mfail\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 #
 # COMMENTS STRIPPED, or the long note explaining Env::hold would satisfy a
 # grep for Env::hold.
-QS_SONY="$ROOT/src/bin/qs-sony.rs"
-if [[ ! -f "$QS_SONY" ]]; then
-    bad "src/bin/qs-sony.rs is missing"
+SONY_SRC="$ROOT/src/bin/jayos-sony.rs"
+if [[ ! -f "$SONY_SRC" ]]; then
+    bad "src/bin/jayos-sony.rs is missing"
 else
     # SCOPED TO THE TEST MODULE, and this is not fussiness: the first version
-    # of the count below matched qs-sony.rs:627, the PRODUCTION call to
+    # of the count below matched jayos-sony.rs:627, the PRODUCTION call to
     # capture(), and reported four call sites where three are tests. A check
     # that counts the thing it is not about is a check that fails for the wrong
     # reason -- which is the better half of that mistake; the other half is
     # passing for the wrong reason.
-    SONY_CODE=$(sed -n '/^mod tests {/,$p' "$QS_SONY" | grep -vE '^[[:space:]]*(//|/\*|\*)')
+    SONY_CODE=$(sed -n '/^mod tests {/,$p' "$SONY_SRC" | grep -vE '^[[:space:]]*(//|/\*|\*)')
 
     # One per subprocess-spawning test. Counted rather than merely present, so
     # removing two of the three is caught.
@@ -90,7 +90,7 @@ fi
 #
 # WHY THIS IS A GREP AND NOT A TEST.
 #
-# `read_until_gone` and the engine's mailbox live in `bin/qs-sonyd.rs`, which
+# `read_until_gone` and the engine's mailbox live in `bin/jayos-sonyd.rs`, which
 # is a binary: no integration test can call either, and `sony_daemon.rs` only
 # starts the process with a bluetoothctl of its own that lists nothing
 # connected -- deliberately, since 2026-11-06, its header says why -- so no
@@ -105,9 +105,9 @@ fi
 # `Down::Closed` existed the whole time and reached `Phase::Idle` correctly
 # (`src/sony/session.rs`, `link_down`); nothing outside the test suite ever
 # produced one.
-SONYD="$ROOT/src/bin/qs-sonyd.rs"
+SONYD="$ROOT/src/bin/jayos-sonyd.rs"
 if [[ ! -f "$SONYD" ]]; then
-    bad "src/bin/qs-sonyd.rs is missing"
+    bad "src/bin/jayos-sonyd.rs is missing"
 else
     # COMMENTS STRIPPED. The comments above both edits name `Down::Failed` and
     # `Down::Closed` in prose, at length, which is exactly the shape that

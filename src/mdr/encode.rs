@@ -629,7 +629,7 @@ pub fn encode(facts: &Facts, verb: &Verb) -> Result<Outgoing, Refusal> {
 /// headset to put its confirmations to us. `None` unless it advertises
 /// FIXED_MESSAGE (t1 0x90).
 ///
-/// OFF UNLESS `qs-sonyd --alerts`, and that is the user's decision rather than
+/// OFF UNLESS `jayos-sonyd --alerts`, and that is the user's decision rather than
 /// an oversight. Once enabled, a headset that would otherwise act on its own
 /// -- dropping a second phone when multipoint is switched off, say -- WAITS
 /// for an answer, and a page that is closed cannot give one. So alerts are a

@@ -89,4 +89,4 @@ here: a fact about a byte is not their code, and their code is not ours to take.
 | [snizovtsev/xm5-mode-switch](https://github.com/snizovtsev/xm5-mode-switch) | GPL-2.0-or-later | A WH-1000XM5 observed answering NC/ASM at inquired type 0x17 |
 | [PrivateiFox/XMDeck](https://github.com/PrivateiFox/XMDeck) | not stated | Pull request #5: NC/ASM at type 0x19 on WH-1000XM5/XM6 |
 | [mos9527/SonyHeadphonesClient pull request #64](https://github.com/mos9527/SonyHeadphonesClient/pull/64) | MIT | The connection-quality write at inquired type 0x00, and multipoint changes needing an ALERT confirmation (tested on a WF-LC900, not an XM5) |
-| [VyomJain6904/sony-headphones-linux](https://github.com/VyomJain6904/sony-headphones-linux) | see the project | The state document's paths, shape and command language, which `qs-sonyd` keeps compatible with |
+| [VyomJain6904/sony-headphones-linux](https://github.com/VyomJain6904/sony-headphones-linux) | see the project | The state document's paths, shape and command language, which `jayos-sonyd` keeps compatible with |
